@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+
+const net = require('net');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const readline = require('readline');
+
+const home = os.homedir();
+const socketPath = path.join(home, '.escribolt', 'escribolt-companion-cli.sock');
+const tokenPath = path.join(home, '.escribolt', 'companion-cli.token');
+
+// Parse args
+const args = process.argv.slice(2);
+
+// Show help if no args or invalid args
+if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+  console.log(`
+Escribolt Companion CLI
+
+Usage:
+  escribolt-companion-cli notes list [--limit <number>]
+  escribolt-companion-cli notes get --id <uuid>
+  escribolt-companion-cli notes transcript get --id <uuid>
+
+Options:
+  --limit <number>   Max number of notes to return (default: 100)
+  --id <uuid>        The unique ID of the note or transcript
+  --help, -h         Show help instructions
+`);
+  process.exit(0);
+}
+
+// Translate args to socket request
+let command = '';
+let payload = {};
+
+const mainArg = args[0];
+const subArg = args[1];
+
+if (mainArg === 'notes') {
+  if (subArg === 'list') {
+    command = 'notes.list';
+    let limit = 100;
+    const limitIndex = args.indexOf('--limit');
+    if (limitIndex !== -1 && args[limitIndex + 1]) {
+      limit = parseInt(args[limitIndex + 1], 10) || 100;
+    }
+    payload = { limit };
+  } else if (subArg === 'get') {
+    command = 'notes.get';
+    const idIndex = args.indexOf('--id');
+    if (idIndex === -1 || !args[idIndex + 1]) {
+      console.error(JSON.stringify({ error: 'invalid_args', message: 'Missing note ID via --id <uuid>' }));
+      process.exit(1);
+    }
+    payload = { id: args[idIndex + 1] };
+  } else if (subArg === 'transcript' && args[2] === 'get') {
+    command = 'notes.transcript.get';
+    const idIndex = args.indexOf('--id');
+    if (idIndex === -1 || !args[idIndex + 1]) {
+      console.error(JSON.stringify({ error: 'invalid_args', message: 'Missing transcript ID via --id <uuid>' }));
+      process.exit(1);
+    }
+    payload = { id: args[idIndex + 1] };
+  } else {
+    console.error(JSON.stringify({ error: 'invalid_args', message: `Unknown notes subcommand: ${subArg}` }));
+    process.exit(1);
+  }
+} else {
+  console.error(JSON.stringify({ error: 'invalid_args', message: `Unknown command: ${mainArg}` }));
+  process.exit(1);
+}
+
+// 1. Read secure authentication token
+if (!fs.existsSync(tokenPath)) {
+  console.error(JSON.stringify({ error: 'no_token', message: 'Auth token file not found. Is Escribolt running?' }));
+  process.exit(1);
+}
+
+const token = fs.readFileSync(tokenPath, 'utf8').trim();
+
+// 2. Connect to Unix socket
+if (!fs.existsSync(socketPath)) {
+  console.error(JSON.stringify({ error: 'no_socket', message: 'Unix socket not found. Is Escribolt running?' }));
+  process.exit(1);
+}
+
+const client = net.createConnection(socketPath);
+
+client.on('connect', () => {
+  // Send authentication
+  client.write(JSON.stringify({ token }) + '\n');
+});
+
+let authenticated = false;
+
+const rl = readline.createInterface({
+  input: client,
+  terminal: false
+});
+
+rl.on('line', (line) => {
+  try {
+    const response = JSON.parse(line.trim());
+    
+    if (!authenticated) {
+      if (response.status === 'authenticated') {
+        authenticated = true;
+        // Send the real request
+        client.write(JSON.stringify({ command, payload }) + '\n');
+      } else {
+        console.error(JSON.stringify({ error: 'auth_failed', message: response.message || 'Authentication failed' }));
+        client.end();
+        process.exit(1);
+      }
+      return;
+    }
+    
+    // Output response to stdout as formatted JSON for external agent parsing
+    console.log(JSON.stringify(response, null, 2));
+    client.end();
+    process.exit(0);
+    
+  } catch (err) {
+    console.error(JSON.stringify({ error: 'parse_error', message: 'Failed to parse response' }));
+    client.end();
+    process.exit(1);
+  }
+});
+
+client.on('error', (err) => {
+  console.error(JSON.stringify({ error: 'socket_error', message: err.message }));
+  process.exit(1);
+});

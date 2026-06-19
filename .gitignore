@@ -1,0 +1,62 @@
+# Node / JS
+node_modules/
+build/
+build-pyinstaller/
+dist/
+*.dmg
+*.zip
+*.blockmap
+latest-mac.yml
+.env
+.env.local
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+
+# MacOS
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift / Native
+.swift-module-cache/
+DerivedData/
+/native/macos-fn-key-helper/bin/
+/native/macos-loopback-helper/bin/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI / ML Models & Caches
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.tflite
+*.pb
+*.gguf
+.cache/
+huggingface/
+models/
+
+# Enterprise extraction guardrails
+/server/
+server/.env
+server/.env.*
+server/data/
+
+/misc/

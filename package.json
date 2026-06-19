@@ -1,0 +1,101 @@
+{
+  "name": "escribolt",
+  "version": "1.0.0",
+  "private": true,
+  "author": "IAMJUNKI",
+  "license": "AGPL-3.0-or-later",
+  "homepage": ".",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IAMJUNKI/escribolt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/IAMJUNKI/escribolt/issues"
+  },
+  "main": "public/electron.js",
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "electron-is-dev": "^2.0.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.9",
+    "ffmpeg-static": "^5.2.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "katex": "^0.17.0",
+    "node-machine-id": "^1.1.12",
+    "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0",
+    "robotjs": "^0.6.0",
+    "ws": "^8.18.0"
+  },
+  "scripts": {
+    "postinstall": "npm run rebuild:native",
+    "start": "concurrently \"npm run pyserver\" \"cross-env BROWSER=none npm run react-start\" \"wait-on http://localhost:3000 && electron .\"",
+    "start:dev": "concurrently \"npm run pyserver:dev\" \"cross-env BROWSER=none npm run react-start\" \"wait-on http://localhost:3000 && electron .\"",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3 -w robotjs",
+    "build:mac-fn-key-helper": "bash scripts/build-mac-fn-key-helper.sh",
+    "build:mac-loopback-helper": "bash scripts/build-mac-loopback-helper.sh",
+    "start:native-loopback": "npm run build:mac-loopback-helper && npm run start",
+    "react-start": "react-scripts start",
+    "build": "react-scripts build",
+    "pydeps": "venv/bin/python -m pip install -r requirements.txt && venv/bin/python -m pip install --no-deps mlx-audio-plus==0.1.8",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "pyserver": "venv/bin/python -m uvicorn backend.main:app --port 8000",
+    "pyserver:dev": "venv/bin/python -m uvicorn backend.main:app --reload --port 8000"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "overrides": {
+    "node-abi": "^4.31.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@tailwindcss/typography": "^0.5.19",
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "@tiptap/extension-color": "^3.23.5",
+    "@tiptap/extension-link": "^3.20.1",
+    "@tiptap/extension-placeholder": "^3.20.1",
+    "@tiptap/extension-task-item": "^3.20.1",
+    "@tiptap/extension-task-list": "^3.20.1",
+    "@tiptap/extension-text-style": "^3.23.5",
+    "@tiptap/extension-underline": "^3.23.5",
+    "@tiptap/pm": "^3.20.1",
+    "@tiptap/react": "^3.20.1",
+    "@tiptap/starter-kit": "^3.20.1",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^8.2.0",
+    "cross-env": "^7.0.3",
+    "electron": "^32.3.3",
+    "lucide-react": "0.244.0",
+    "node-abi": "^4.31.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "react-scripts": "^5.0.1",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^3.3.3",
+    "tiptap-markdown": "^0.9.0",
+    "wait-on": "^7.0.1",
+    "web-vitals": "^2.1.4"
+  }
+}
