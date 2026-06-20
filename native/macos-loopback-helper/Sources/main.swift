@@ -27,6 +27,7 @@ enum HelperError: LocalizedError {
 struct HelperArguments {
     let systemOutputPath: String
     let microphoneOutputPath: String?
+    let probeOnly: Bool
 }
 
 func escapedForJSON(_ text: String) -> String {
@@ -445,6 +446,7 @@ func argumentValue(arguments: [String], for flag: String) -> String? {
 }
 
 func parseHelperArguments(arguments: [String]) -> HelperArguments? {
+    let probeOnly = arguments.contains("--probe") || arguments.contains("--permission-probe")
     let systemOutputPath = argumentValue(arguments: arguments, for: "--output-system")
         ?? argumentValue(arguments: arguments, for: "--output")
     guard let systemOutputPath, !systemOutputPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -455,7 +457,8 @@ func parseHelperArguments(arguments: [String]) -> HelperArguments? {
     let cleanMicPath = microphoneOutputPath?.trimmingCharacters(in: .whitespacesAndNewlines)
     return HelperArguments(
         systemOutputPath: systemOutputPath,
-        microphoneOutputPath: cleanMicPath?.isEmpty == false ? cleanMicPath : nil
+        microphoneOutputPath: cleanMicPath?.isEmpty == false ? cleanMicPath : nil,
+        probeOnly: probeOnly
     )
 }
 
@@ -502,6 +505,11 @@ Task {
             print("{\"status\":\"started\",\"output\":\"\(escapedForJSON(systemOutputURL.path))\",\"microphone\":false,\"microphoneMode\":\"none\"}")
         }
         fflush(stdout)
+        if helperArguments.probeOnly {
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            recorder.stopAndWait(timeoutSeconds: 3.0)
+            exit(0)
+        }
     } catch {
         fputs("{\"status\":\"error\",\"message\":\"\(escapedForJSON(error.localizedDescription))\"}\n", stderr)
         exit(2)

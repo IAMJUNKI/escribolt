@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
     Mic, 
     Accessibility, 
@@ -53,6 +53,10 @@ export default function OnboardingPage({
     
     const [accessibilityStatus, setAccessibilityStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
     const [accessibilityLoading, setAccessibilityLoading] = useState(false);
+    const [fnListenerStatus, setFnListenerStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
+    const [fnListenerMessage, setFnListenerMessage] = useState('');
+    const [fnListenerLoading, setFnListenerLoading] = useState(false);
+    const [inputMonitoringLoading, setInputMonitoringLoading] = useState(false);
 
     const [screenStatus, setScreenStatus] = useState<'unknown' | 'granted' | 'denied' | 'not-determined'>('unknown');
     const [screenLoading, setScreenLoading] = useState(false);
@@ -66,6 +70,30 @@ export default function OnboardingPage({
 
     // General submission state
     const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const applyFnListenerResult = useCallback((result: any) => {
+        const status = String(result?.status || 'unknown').toLowerCase();
+        if (status === 'granted') setFnListenerStatus('granted');
+        else if (status === 'denied' || status === 'restricted') setFnListenerStatus('denied');
+        else setFnListenerStatus('unknown');
+        setFnListenerMessage(typeof result?.message === 'string' ? result.message : '');
+        return status;
+    }, []);
+
+    const refreshFnListenerAccess = useCallback(async (showLoading = false) => {
+        if (showLoading) setFnListenerLoading(true);
+        try {
+            const result = await ipcRenderer.invoke('fn-listener:get-access-status');
+            return applyFnListenerResult(result);
+        } catch (error) {
+            console.error('Failed checking Fn/Globe listener access:', error);
+            setFnListenerStatus('unknown');
+            setFnListenerMessage('');
+            return 'unknown';
+        } finally {
+            if (showLoading) setFnListenerLoading(false);
+        }
+    }, [applyFnListenerResult]);
 
     // Listen for auth state updates (when user logs in from browser)
     useEffect(() => {
@@ -86,6 +114,8 @@ export default function OnboardingPage({
         let timer: NodeJS.Timeout;
         
         const checkPermissions = async () => {
+            let latestAccessibilityStatus: 'unknown' | 'granted' | 'denied' = 'unknown';
+
             // Check Microphone status
             try {
                 const result = await ipcRenderer.invoke('microphone:get-access-status');
@@ -102,14 +132,27 @@ export default function OnboardingPage({
             try {
                 const result = await ipcRenderer.invoke('accessibility:get-access-status');
                 const status = String(result?.status || 'unknown').toLowerCase();
-                if (status === 'granted') setAccessibilityStatus('granted');
-                else if (status === 'denied') setAccessibilityStatus('denied');
-                else setAccessibilityStatus('unknown');
+                if (status === 'granted') latestAccessibilityStatus = 'granted';
+                else if (status === 'denied') latestAccessibilityStatus = 'denied';
+                else latestAccessibilityStatus = 'unknown';
+                setAccessibilityStatus(latestAccessibilityStatus);
             } catch (e) {
                 console.error('Failed checking accessibility permission:', e);
+                latestAccessibilityStatus = 'unknown';
             }
 
-            // Check Screen Recording status
+            // Check whether the Fn/Globe event listener actually works. Accessibility often
+            // grants this path even when macOS Input Monitoring preflight still reports denied.
+            if (latestAccessibilityStatus === 'granted') {
+                if (fnListenerStatus !== 'granted') {
+                    await refreshFnListenerAccess(false);
+                }
+            } else {
+                setFnListenerStatus('unknown');
+                setFnListenerMessage('');
+            }
+
+            // Check System Audio Recording status
             try {
                 const result = await ipcRenderer.invoke('screen:get-access-status');
                 const status = String(result?.status || 'unknown').toLowerCase();
@@ -118,7 +161,7 @@ export default function OnboardingPage({
                 else if (status === 'not-determined') setScreenStatus('not-determined');
                 else setScreenStatus('unknown');
             } catch (e) {
-                console.error('Failed checking screen recording permission:', e);
+                console.error('Failed checking system audio recording permission:', e);
             }
 
             // Check Keychain secure storage status
@@ -155,22 +198,22 @@ export default function OnboardingPage({
         return () => {
             if (timer) clearInterval(timer);
         };
-    }, [step]);
+    }, [step, refreshFnListenerAccess, fnListenerStatus]);
 
     // Auto-advance sub-steps as they get completed
     useEffect(() => {
         if (step === 'permissions') {
             if (micStatus === 'granted' && activeSubStep === 'mic') {
                 setActiveSubStep('accessibility');
-            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && activeSubStep === 'accessibility') {
+            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && activeSubStep === 'accessibility') {
                 setActiveSubStep('screen');
-            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && screenStatus === 'granted' && activeSubStep === 'screen') {
+            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && screenStatus === 'granted' && activeSubStep === 'screen') {
                 setActiveSubStep('keychain');
-            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && screenStatus === 'granted' && keychainStatus === 'primed' && activeSubStep === 'keychain') {
+            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && screenStatus === 'granted' && keychainStatus === 'primed' && activeSubStep === 'keychain') {
                 setActiveSubStep('meetings');
             }
         }
-    }, [step, micStatus, accessibilityStatus, screenStatus, keychainStatus, activeSubStep]);
+    }, [step, micStatus, accessibilityStatus, fnListenerStatus, screenStatus, keychainStatus, activeSubStep]);
 
     // Request mic access
     const requestMicAccess = async () => {
@@ -210,7 +253,27 @@ export default function OnboardingPage({
         }
     };
 
-    // Request Screen Recording permission
+    const requestInputMonitoringAccess = async () => {
+        setInputMonitoringLoading(true);
+        try {
+            await ipcRenderer.invoke('input-monitoring:request-access');
+            const listenerStatus = await refreshFnListenerAccess(false);
+            if (listenerStatus === 'granted') {
+                setFnListenerStatus('granted');
+            } else {
+                setFnListenerStatus('denied');
+                await ipcRenderer.invoke('input-monitoring:open-settings');
+            }
+        } catch (error) {
+            console.error('Failed to request input monitoring access:', error);
+            setFnListenerStatus('denied');
+            await ipcRenderer.invoke('input-monitoring:open-settings');
+        } finally {
+            setInputMonitoringLoading(false);
+        }
+    };
+
+    // Request System Audio Recording permission
     const requestScreenAccess = async () => {
         setScreenLoading(true);
         try {
@@ -223,7 +286,7 @@ export default function OnboardingPage({
                 await ipcRenderer.invoke('screen:open-settings');
             }
         } catch (error) {
-            console.error('Failed to request screen recording access:', error);
+            console.error('Failed to request system audio recording access:', error);
             setScreenStatus('denied');
             await ipcRenderer.invoke('screen:open-settings');
         } finally {
@@ -318,6 +381,9 @@ export default function OnboardingPage({
         account: '75%',
         tutorial: '100%'
     }[step];
+    const shortcutsReady = accessibilityStatus === 'granted' && fnListenerStatus === 'granted';
+    const permissionsBeforeSystemAudioReady = micStatus === 'granted' && shortcutsReady;
+    const permissionsBeforeKeychainReady = permissionsBeforeSystemAudioReady && screenStatus === 'granted';
 
     // Helper to determine the active permission illustration on the right panel
     const renderActiveIllustration = () => {
@@ -655,7 +721,7 @@ export default function OnboardingPage({
                                             )}
                                         </div>
 
-                                        {/* 2. Accessibility / Pasting (Mandatory) */}
+                                        {/* 2. Accessibility (Mandatory) */}
                                         <div 
                                             onClick={() => {
                                                 if (micStatus === 'granted') {
@@ -673,38 +739,74 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        accessibilityStatus === 'granted' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        shortcutsReady ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
                                                     }`}>
-                                                        {accessibilityStatus === 'granted' ? <Check size={14} strokeWidth={3} /> : <Accessibility size={14} />}
+                                                        {shortcutsReady ? <Check size={14} strokeWidth={3} /> : <Accessibility size={14} />}
                                                     </div>
                                                     <div>
-                                                        <div className="text-xs font-bold es-general-text">2. Shortcuts & Pasting (Accessibility)</div>
-                                                        <div className="text-[10px] es-general-secondary-text">Required to paste dictations using Fn Key</div>
+                                                        <div className="text-xs font-bold es-general-text">2. Shortcuts & Pasting</div>
+                                                        <div className="text-[10px] es-general-secondary-text">Requires Accessibility</div>
                                                     </div>
                                                 </div>
-                                                {accessibilityStatus === 'granted' ? (
+                                                {shortcutsReady ? (
                                                     <span className="text-[10px] text-emerald-400 font-bold uppercase">Allowed</span>
                                                 ) : (
                                                     <span className="text-[10px] text-rose-400 font-bold uppercase">Required</span>
                                                 )}
                                             </div>
 
-                                            {activeSubStep === 'accessibility' && accessibilityStatus !== 'granted' && (
+                                            {activeSubStep === 'accessibility' && !shortcutsReady && (
                                                 <div className="mt-3 pt-3 border-t es-global-separator space-y-2.5">
                                                     <p className="text-[11px] es-general-secondary-text leading-snug">
-                                                        Allows Escribolt to type-paste text and listen to the global <strong>Fn / Globe key</strong> in the background.
+                                                        Accessibility lets Escribolt paste dictations and listen for the global <strong>Fn / Globe key</strong> in the background.
                                                     </p>
-                                                    <button
-                                                        type="button"
-                                                        disabled={accessibilityLoading}
-                                                        onClick={(e) => {
-                                                             e.stopPropagation();
-                                                             requestAccessibilityAccess();
-                                                         }}
-                                                        className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
-                                                    >
-                                                        {accessibilityLoading ? 'Triggering Settings...' : 'Allow'}
-                                                    </button>
+                                                    {accessibilityStatus === 'granted' && fnListenerStatus !== 'granted' && (
+                                                        <p className="text-[10px] es-general-secondary-text leading-snug">
+                                                            Fn / Globe listening is still unavailable on this Mac. Some macOS setups require Input Monitoring too.
+                                                            {fnListenerMessage ? ` ${fnListenerMessage}` : ''}
+                                                        </p>
+                                                    )}
+                                                    <div className="flex flex-wrap gap-2">
+                                                        {accessibilityStatus !== 'granted' && (
+                                                            <button
+                                                                type="button"
+                                                                disabled={accessibilityLoading}
+                                                                onClick={(e) => {
+                                                                     e.stopPropagation();
+                                                                     requestAccessibilityAccess();
+                                                                 }}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
+                                                            >
+                                                                {accessibilityLoading ? 'Opening...' : 'Allow Accessibility'}
+                                                            </button>
+                                                        )}
+                                                        {accessibilityStatus === 'granted' && fnListenerStatus !== 'granted' && (
+                                                            <button
+                                                                type="button"
+                                                                disabled={fnListenerLoading}
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    refreshFnListenerAccess(true);
+                                                                }}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text disabled:opacity-50"
+                                                            >
+                                                                {fnListenerLoading ? 'Checking...' : 'Check Again'}
+                                                            </button>
+                                                        )}
+                                                        {accessibilityStatus === 'granted' && fnListenerStatus === 'denied' && (
+                                                            <button
+                                                                type="button"
+                                                                disabled={inputMonitoringLoading}
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    requestInputMonitoringAccess();
+                                                                }}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
+                                                            >
+                                                                {inputMonitoringLoading ? 'Requesting...' : 'Allow Input Monitoring'}
+                                                            </button>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             )}
                                         </div>
@@ -712,12 +814,12 @@ export default function OnboardingPage({
                                         {/* 3. System Audio Recording (Mandatory) */}
                                         <div 
                                             onClick={() => {
-                                                if (micStatus === 'granted' && accessibilityStatus === 'granted') {
+                                                if (permissionsBeforeSystemAudioReady) {
                                                     setActiveSubStep('screen');
                                                 }
                                             }}
                                             className={`p-4 rounded-xl border transition-all ${
-                                                (micStatus !== 'granted' || accessibilityStatus !== 'granted') ? 'opacity-40 pointer-events-none' : 'cursor-pointer'
+                                                !permissionsBeforeSystemAudioReady ? 'opacity-40 pointer-events-none' : 'cursor-pointer'
                                             } ${
                                                 activeSubStep === 'screen' 
                                                     ? 'border-emerald-500 bg-emerald-500/5 shadow-sm' 
@@ -749,20 +851,33 @@ export default function OnboardingPage({
                                                         Escribolt needs to capture <strong>system audio only</strong> to record meeting sound from apps like Google Meet, Zoom, and Teams. <strong>No video or screen content is recorded or transmitted.</strong>
                                                     </p>
                                                     <p className="text-[10px] es-general-secondary-text leading-snug italic">
-                                                        Note: macOS may show a warning about "bypassing the system private window picker" — this is required to directly capture audio without manual window selection each time.
+                                                        In macOS System Settings, enable Escribolt under System Audio Recording Only. On some macOS versions, Apple shows this under Screen & System Audio Recording.
                                                     </p>
                                                     <div className="flex gap-2">
                                                         {screenStatus === 'denied' ? (
-                                                            <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    ipcRenderer.invoke('screen:open-settings');
-                                                                }}
-                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
-                                                            >
-                                                                Open System Settings
-                                                            </button>
+                                                            <>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        ipcRenderer.invoke('screen:open-settings');
+                                                                    }}
+                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
+                                                                >
+                                                                    Open System Settings
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={screenLoading}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        requestScreenAccess();
+                                                                    }}
+                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text disabled:opacity-50"
+                                                                >
+                                                                    {screenLoading ? 'Checking...' : 'Check Again'}
+                                                                </button>
+                                                            </>
                                                         ) : (
                                                             <button
                                                                 type="button"
@@ -784,12 +899,12 @@ export default function OnboardingPage({
                                         {/* 4. Secure Keychain Storage (Required) */}
                                         <div 
                                             onClick={() => {
-                                                if (micStatus === 'granted' && accessibilityStatus === 'granted' && screenStatus === 'granted') {
+                                                if (permissionsBeforeKeychainReady) {
                                                     setActiveSubStep('keychain');
                                                 }
                                             }}
                                             className={`p-4 rounded-xl border transition-all ${
-                                                (micStatus !== 'granted' || accessibilityStatus !== 'granted' || screenStatus !== 'granted') ? 'opacity-40 pointer-events-none' : 'cursor-pointer'
+                                                !permissionsBeforeKeychainReady ? 'opacity-40 pointer-events-none' : 'cursor-pointer'
                                             } ${
                                                 activeSubStep === 'keychain' 
                                                     ? 'border-emerald-500 bg-emerald-500/5 shadow-sm' 

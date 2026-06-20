@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Escribolt</string>
+    <key>CFBundleExecutable</key>
+    <string>macos-loopback-helper</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.escribolt.app.loopback-helper</string>
+    <key>CFBundleName</key>
+    <string>Escribolt</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.3</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Escribolt requires system audio access to capture meeting audio during recordings.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Escribolt requires microphone access to record your voice during all-audio meeting recordings.</string>
+  </dict>
+</plist>

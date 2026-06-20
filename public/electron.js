@@ -246,7 +246,9 @@ PRO_BRANDED_LLM_MODELS.forEach((entry) => {
   PRO_BRANDED_LLM_MODEL_LOOKUP.set(entry.id, entry);
 });
 
-app.commandLine.appendSwitch('enable-features', LOOPBACK_FEATURE_FLAGS);
+if (ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+  app.commandLine.appendSwitch('enable-features', LOOPBACK_FEATURE_FLAGS);
+}
 
 let mainWindow;
 let promoBannerPending = false;
@@ -282,6 +284,12 @@ let cachedDeviceIdHash = null;
 let loggedMissingDeviceIdWarning = false;
 let lastTrialExhaustedNoticeAt = 0;
 const recordModeSessions = new Map();
+const nativeMacSystemAudioPermissionState = {
+  status: 'unknown',
+  message: '',
+  requestedAt: 0,
+  checkedAt: 0,
+};
 let recordModeStartPending = false;
 let recordModeWidgetVisible = false;
 let trayRecordModeStatus = 'idle';
@@ -4749,6 +4757,138 @@ function handleNativeHelperStdoutLine(line, session = null) {
   }
 
   console.log(`[record-mode][native-helper][stdout] ${trimmed}`);
+}
+
+function getNativeMacSystemAudioPermissionStatus() {
+  if (process.platform !== 'darwin') {
+    return {
+      status: 'granted',
+      granted: true,
+      canRequest: false,
+      platform: process.platform,
+      service: 'system-audio',
+    };
+  }
+
+  return {
+    status: nativeMacSystemAudioPermissionState.status || 'unknown',
+    granted: nativeMacSystemAudioPermissionState.status === 'granted',
+    canRequest: true,
+    platform: process.platform,
+    service: 'system-audio',
+    message: nativeMacSystemAudioPermissionState.message || '',
+    requestedAt: nativeMacSystemAudioPermissionState.requestedAt || 0,
+    checkedAt: nativeMacSystemAudioPermissionState.checkedAt || 0,
+  };
+}
+
+async function runNativeMacSystemAudioPermissionProbe({ timeoutMs = 60000 } = {}) {
+  if (process.platform !== 'darwin') {
+    return getNativeMacSystemAudioPermissionStatus();
+  }
+
+  const helperPath = resolveNativeMacLoopbackHelperPath();
+  if (!helperPath) {
+    const message = 'Native macOS loopback helper binary not found.';
+    nativeMacSystemAudioPermissionState.status = 'unknown';
+    nativeMacSystemAudioPermissionState.message = message;
+    nativeMacSystemAudioPermissionState.checkedAt = Date.now();
+    return {
+      ...getNativeMacSystemAudioPermissionStatus(),
+      canRequest: false,
+      message,
+    };
+  }
+
+  const probeId = crypto.randomUUID();
+  const probeOutputPath = path.join(app.getPath('temp'), `escribolt-system-audio-permission-${probeId}.m4a`);
+  nativeMacSystemAudioPermissionState.requestedAt = Date.now();
+  nativeMacSystemAudioPermissionState.checkedAt = 0;
+  nativeMacSystemAudioPermissionState.message = '';
+
+  let stdoutText = '';
+  let stderrText = '';
+
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const helperProcess = spawn(helperPath, ['--probe', '--output', probeOutputPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      const finish = (handler) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        handler();
+      };
+
+      const timeout = setTimeout(() => {
+        try {
+          helperProcess.kill('SIGTERM');
+        } catch (_error) {
+          // Ignore kill failures; the promise rejects below.
+        }
+        finish(() => reject(new Error('System audio permission prompt timed out.')));
+      }, timeoutMs);
+
+      helperProcess.stdout.on('data', (chunk) => {
+        stdoutText += String(chunk || '');
+      });
+
+      helperProcess.stderr.on('data', (chunk) => {
+        stderrText += String(chunk || '');
+      });
+
+      helperProcess.once('error', (error) => {
+        finish(() => reject(new Error(`Failed to launch native helper: ${error.message}`)));
+      });
+
+      helperProcess.once('exit', (code, signal) => {
+        if (code === 0) {
+          finish(resolve);
+          return;
+        }
+        const stderrLines = stderrText
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        let message = stderrLines.join(' ');
+        for (const line of stderrLines) {
+          try {
+            const payload = JSON.parse(line);
+            if (payload && typeof payload.message === 'string' && payload.message.trim()) {
+              message = payload.message.trim();
+              break;
+            }
+          } catch (_error) {
+            // Keep the raw stderr text.
+          }
+        }
+        if (!message) {
+          message = `Native helper exited before system audio permission was granted (code=${code}, signal=${signal || 'none'}).`;
+        }
+        finish(() => reject(new Error(message)));
+      });
+    });
+
+    nativeMacSystemAudioPermissionState.status = 'granted';
+    nativeMacSystemAudioPermissionState.message = '';
+    nativeMacSystemAudioPermissionState.checkedAt = Date.now();
+    if (stdoutText.trim()) {
+      console.log(`[permissions][system-audio] probe succeeded: ${stdoutText.trim()}`);
+    }
+    return getNativeMacSystemAudioPermissionStatus();
+  } catch (error) {
+    const message = error && error.message ? error.message : 'System audio permission was not granted.';
+    nativeMacSystemAudioPermissionState.status = /timed out/i.test(message) ? 'not-determined' : 'denied';
+    nativeMacSystemAudioPermissionState.message = message;
+    nativeMacSystemAudioPermissionState.checkedAt = Date.now();
+    console.warn(`[permissions][system-audio] probe failed: ${message}`);
+    return getNativeMacSystemAudioPermissionStatus();
+  } finally {
+    await deleteFileIfExists(probeOutputPath);
+  }
 }
 
 async function createNativeRecordModeSession(options = {}) {
@@ -9484,6 +9624,214 @@ function resolveNativeMacFnKeyHelperPath() {
   return '';
 }
 
+function runNativeFnKeyHelperPermissionCommand(args = []) {
+  return new Promise((resolve) => {
+    if (process.platform !== 'darwin') {
+      resolve({ status: 'granted', granted: true, canRequest: false, platform: process.platform });
+      return;
+    }
+
+    const helperPath = resolveNativeMacFnKeyHelperPath();
+    if (!helperPath) {
+      resolve({
+        status: 'unknown',
+        granted: false,
+        canRequest: false,
+        platform: process.platform,
+        message: 'Native Fn key helper binary not found. Build it with npm run build:mac-fn-key-helper.',
+      });
+      return;
+    }
+
+    let stdoutText = '';
+    let stderrText = '';
+    let settled = false;
+    const child = spawn(helperPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(payload);
+    };
+
+    const timeout = setTimeout(() => {
+      try {
+        child.kill('SIGTERM');
+      } catch (_error) {}
+      finish({
+        status: 'unknown',
+        granted: false,
+        canRequest: true,
+        platform: process.platform,
+        message: 'Input Monitoring permission check timed out.',
+      });
+    }, 30000);
+
+    child.stdout.on('data', (chunk) => {
+      stdoutText += String(chunk || '');
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderrText += String(chunk || '');
+    });
+
+    child.once('error', (error) => {
+      finish({
+        status: 'unknown',
+        granted: false,
+        canRequest: false,
+        platform: process.platform,
+        message: error && error.message ? error.message : 'Failed to launch Fn key helper.',
+      });
+    });
+
+    child.once('exit', (code) => {
+      const stdoutLines = stdoutText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      let status = code === 0 ? 'granted' : 'denied';
+      for (const line of stdoutLines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.permission === 'input-monitoring' && typeof parsed.status === 'string') {
+            status = parsed.status.trim().toLowerCase() || status;
+            break;
+          }
+        } catch (_error) {
+          // Ignore non-JSON helper output.
+        }
+      }
+      const message = stderrText.trim();
+      finish({
+        status,
+        granted: status === 'granted',
+        canRequest: true,
+        platform: process.platform,
+        message,
+      });
+    });
+  });
+}
+
+function runNativeFnKeyHelperAvailabilityProbe() {
+  return new Promise((resolve) => {
+    if (process.platform !== 'darwin') {
+      resolve({ status: 'granted', granted: true, canRequestInputMonitoring: false, platform: process.platform });
+      return;
+    }
+
+    if (fnKeyHelperAvailable && fnKeyHelperProcess) {
+      resolve({ status: 'granted', granted: true, canRequestInputMonitoring: true, platform: process.platform });
+      return;
+    }
+
+    const helperPath = resolveNativeMacFnKeyHelperPath();
+    if (!helperPath) {
+      resolve({
+        status: 'unknown',
+        granted: false,
+        canRequestInputMonitoring: false,
+        platform: process.platform,
+        message: 'Native Fn key helper binary not found. Build it with npm run build:mac-fn-key-helper.',
+      });
+      return;
+    }
+
+    let stdoutText = '';
+    let stderrText = '';
+    let settled = false;
+    const child = spawn(helperPath, ['--probe-event-tap'], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(payload);
+    };
+
+    const timeout = setTimeout(() => {
+      try {
+        child.kill('SIGTERM');
+      } catch (_error) {}
+      finish({
+        status: 'unknown',
+        granted: false,
+        canRequestInputMonitoring: true,
+        platform: process.platform,
+        message: 'Fn/Globe listener check timed out.',
+      });
+    }, 8000);
+
+    child.stdout.on('data', (chunk) => {
+      stdoutText += String(chunk || '');
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderrText += String(chunk || '');
+    });
+
+    child.once('error', (error) => {
+      finish({
+        status: 'unknown',
+        granted: false,
+        canRequestInputMonitoring: false,
+        platform: process.platform,
+        message: error && error.message ? error.message : 'Failed to launch Fn key helper.',
+      });
+    });
+
+    child.once('exit', (code) => {
+      const stdoutLines = stdoutText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const stderrLines = stderrText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      let status = code === 0 ? 'granted' : 'denied';
+      let parsedMessage = '';
+      for (const line of stdoutLines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.permission === 'fn-listener' && typeof parsed.status === 'string') {
+            status = parsed.status.trim().toLowerCase() || status;
+            if (typeof parsed.message === 'string') {
+              parsedMessage = parsed.message;
+            }
+            break;
+          }
+        } catch (_error) {
+          // Ignore non-JSON helper output.
+        }
+      }
+      for (const line of stderrLines) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed.message === 'string') {
+            parsedMessage = parsed.message;
+            break;
+          }
+        } catch (_error) {
+          if (!parsedMessage) {
+            parsedMessage = line;
+          }
+        }
+      }
+      const message = parsedMessage || stderrText.trim();
+      finish({
+        status,
+        granted: status === 'granted',
+        canRequestInputMonitoring: true,
+        platform: process.platform,
+        message,
+      });
+    });
+  });
+}
+
 function prettyAccelerator(accelerator = '') {
   return String(accelerator || '')
     .replace(/Command/g, 'Cmd')
@@ -9990,6 +10338,9 @@ function getScreenCapturePermissionStatus() {
   if (process.platform !== 'darwin') {
     return 'not-applicable';
   }
+  if (!ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+    return 'not-used';
+  }
   if (!systemPreferences || typeof systemPreferences.getMediaAccessStatus !== 'function') {
     return 'unknown';
   }
@@ -10001,6 +10352,10 @@ function getScreenCapturePermissionStatus() {
 }
 
 function initializeDisplayMediaLoopbackHandler() {
+  if (!ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+    console.log('[record-mode] Electron display-media loopback handler disabled; using native audio-only helper when available.');
+    return;
+  }
   if (!session || !session.defaultSession || typeof session.defaultSession.setDisplayMediaRequestHandler !== 'function') {
     console.warn('[record-mode] setDisplayMediaRequestHandler is not available in this Electron build.');
     return;
@@ -13054,6 +13409,40 @@ app.whenReady().then(async () => {
     }
     return { success: false };
   });
+  ipcMain.handle('fn-listener:get-access-status', async () => {
+    if (process.platform !== 'darwin') {
+      return { status: 'granted', granted: true, canRequestInputMonitoring: false, platform: process.platform };
+    }
+    return runNativeFnKeyHelperAvailabilityProbe();
+  });
+  ipcMain.handle('input-monitoring:get-access-status', async () => {
+    if (process.platform !== 'darwin') {
+      return { status: 'granted', granted: true, canRequest: false, platform: process.platform };
+    }
+    return runNativeFnKeyHelperPermissionCommand(['--preflight-input-monitoring']);
+  });
+  ipcMain.handle('input-monitoring:request-access', async () => {
+    if (process.platform !== 'darwin') {
+      return { status: 'granted', granted: true, canRequest: false, platform: process.platform };
+    }
+    return runNativeFnKeyHelperPermissionCommand(['--request-input-monitoring']);
+  });
+  ipcMain.handle('input-monitoring:open-settings', async () => {
+    if (process.platform !== 'darwin') {
+      return { success: true };
+    }
+    const urls = [
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
+      'x-apple.systempreferences:com.apple.preference.security',
+    ];
+    for (const url of urls) {
+      try {
+        await shell.openExternal(url);
+        return { success: true, url };
+      } catch (_e) {}
+    }
+    return { success: false };
+  });
   ipcMain.handle('microphone:open-settings', async () => {
     if (process.platform !== 'darwin') {
       return { success: true };
@@ -13075,6 +13464,16 @@ app.whenReady().then(async () => {
       return { status: 'granted', platform: process.platform };
     }
     try {
+      if (resolveNativeMacLoopbackHelperPath()) {
+        return getNativeMacSystemAudioPermissionStatus();
+      }
+      if (!ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+        return {
+          status: 'unknown',
+          platform: process.platform,
+          message: 'Native system audio helper is unavailable and Electron screen capture fallback is disabled.',
+        };
+      }
       const status = getScreenCapturePermissionStatus();
       return { status, platform: process.platform };
     } catch (error) {
@@ -13086,6 +13485,16 @@ app.whenReady().then(async () => {
       return { status: 'granted', platform: process.platform };
     }
     try {
+      if (resolveNativeMacLoopbackHelperPath()) {
+        return await runNativeMacSystemAudioPermissionProbe();
+      }
+      if (!ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+        return {
+          status: 'unknown',
+          platform: process.platform,
+          message: 'Native system audio helper is unavailable and Electron screen capture fallback is disabled.',
+        };
+      }
       await desktopCapturer.getSources({
         types: ['screen'],
         fetchWindowIcons: false,
@@ -13126,6 +13535,14 @@ app.whenReady().then(async () => {
       const requestedEngine = payload.captureEngine === 'native-helper'
         ? 'native-helper'
         : 'electron-mediarecorder';
+      if (process.platform === 'darwin'
+          && requestedEngine === 'electron-mediarecorder'
+          && !ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {
+        return {
+          status: 'error',
+          message: 'Electron screen-capture loopback is disabled in this build. Use the native system-audio helper.',
+        };
+      }
 
       const session = requestedEngine === 'native-helper'
         ? await createNativeRecordModeSession({
@@ -13198,6 +13615,7 @@ app.whenReady().then(async () => {
       ...diagnostics,
       recommendedCaptureEngine,
       screenCapturePermission: getScreenCapturePermissionStatus(),
+      systemAudioPermission: getNativeMacSystemAudioPermissionStatus(),
     };
   });
   ipcMain.on('record-mode:command-listener-ready', (event) => {

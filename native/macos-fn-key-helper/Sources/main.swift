@@ -20,13 +20,32 @@ private func emitJson(_ payload: [String: Any], toStderr: Bool = false) {
     }
 }
 
-private func handleSignal(_ signal: Int32) {
+private func stopEventTap() {
     if let source = runLoopSource {
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+        runLoopSource = nil
     }
     if let tap = eventTapHandle {
         CFMachPortInvalidate(tap)
+        eventTapHandle = nil
     }
+}
+
+private func emitInputMonitoringStatus(requestAccess: Bool) {
+    let granted = requestAccess
+        ? CGRequestListenEventAccess()
+        : CGPreflightListenEventAccess()
+    emitJson([
+        "type": "status",
+        "status": granted ? "granted" : "denied",
+        "permission": "input-monitoring",
+        "requested": requestAccess,
+        "timestamp": Date().timeIntervalSince1970,
+    ])
+}
+
+private func handleSignal(_ signal: Int32) {
+    stopEventTap()
     emitJson([
         "type": "status",
         "status": "stopped",
@@ -125,6 +144,29 @@ private func startEventTap() -> Bool {
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
     CGEvent.tapEnable(tap: eventTap, enable: true)
     return true
+}
+
+let arguments = CommandLine.arguments
+if arguments.contains("--preflight-input-monitoring") {
+    emitInputMonitoringStatus(requestAccess: false)
+    exit(CGPreflightListenEventAccess() ? 0 : 2)
+}
+if arguments.contains("--request-input-monitoring") {
+    emitInputMonitoringStatus(requestAccess: true)
+    exit(CGPreflightListenEventAccess() ? 0 : 2)
+}
+if arguments.contains("--probe-event-tap") {
+    if startEventTap() {
+        emitJson([
+            "type": "status",
+            "status": "granted",
+            "permission": "fn-listener",
+            "timestamp": Date().timeIntervalSince1970,
+        ])
+        stopEventTap()
+        exit(0)
+    }
+    exit(2)
 }
 
 signal(SIGTERM) { signal in
