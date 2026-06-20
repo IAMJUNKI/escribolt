@@ -396,7 +396,7 @@ let stickyWindows = new Map(); // id -> BrowserWindow
 let pendingStickyWindowFinalSaveCloses = new Map(); // id -> cancellation handle
 let lastStickyWindowBounds = null;
 let dashboardWindow = null; // Reference to the Unified Dashboard window
-let pendingDashboardNoteNavigationId = null;
+let pendingDashboardNavigation = null;
 let dashboardRecordModeCommandReady = false;
 let pendingDashboardRecordModeCommand = null;
 let pendingDashboardRecordModeCommandTimer = null;
@@ -5602,6 +5602,7 @@ function persistChatsData(options = {}) {
   chatsData.chats = (Array.isArray(chatsData.chats) ? chatsData.chats : []).map((entry) => normalizeChatEntry(entry));
   writeLocalStateValue(CHATS_STATE_KEY, chatsData);
   broadcastChatsUpdate();
+  rebuildTrayMenuIfReady();
   if (shouldScheduleSync) {
     scheduleSyncRun();
   }
@@ -5647,6 +5648,7 @@ function persistNotesData(options = {}) {
   }));
   writeLocalStateValue(NOTES_STATE_KEY, notesData);
   broadcastNotesUpdate();
+  rebuildTrayMenuIfReady();
   if (shouldScheduleSync) {
     scheduleSyncRun();
   }
@@ -5724,6 +5726,7 @@ function persistRecordingsData(options = {}) {
   const shouldScheduleSync = options.triggerSync !== false;
   writeLocalStateValue(RECORDINGS_STATE_KEY, recordingsData);
   broadcastRecordingsUpdate();
+  rebuildTrayMenuIfReady();
   if (shouldScheduleSync) {
     scheduleSyncRun();
   }
@@ -7649,12 +7652,27 @@ function createDashboardWindow(options = {}) {
   });
 }
 
-function openNoteInDashboard(noteId, options = {}) {
-  const safeNoteId = typeof noteId === 'string' ? noteId.trim() : '';
-  if (!safeNoteId) return;
+function normalizeDashboardNavigationDestination(destination = {}) {
+  const type = typeof destination.type === 'string' ? destination.type.trim() : '';
+  const id = typeof destination.id === 'string' ? destination.id.trim() : '';
+  if ((type === 'note' || type === 'recording' || type === 'chat') && id) {
+    return { type, id };
+  }
+  if (type === 'settings') {
+    const settingsTab = typeof destination.settingsTab === 'string' && destination.settingsTab.trim()
+      ? destination.settingsTab.trim()
+      : 'general';
+    return { type, settingsTab };
+  }
+  return null;
+}
+
+function openDashboardDestination(destination = {}, options = {}) {
+  const normalizedDestination = normalizeDashboardNavigationDestination(destination);
+  if (!normalizedDestination) return;
 
   const shouldFocus = options && options.focus !== false;
-  pendingDashboardNoteNavigationId = safeNoteId;
+  pendingDashboardNavigation = normalizedDestination;
 
   createDashboardWindow({ show: true, focus: shouldFocus });
   if (!dashboardWindow || dashboardWindow.isDestroyed()) {
@@ -7665,8 +7683,14 @@ function openNoteInDashboard(noteId, options = {}) {
     return;
   }
 
-  dashboardWindow.webContents.send('dashboard:open-note', { noteId: safeNoteId });
-  pendingDashboardNoteNavigationId = null;
+  dashboardWindow.webContents.send('dashboard:navigate', normalizedDestination);
+  pendingDashboardNavigation = null;
+}
+
+function openNoteInDashboard(noteId, options = {}) {
+  const safeNoteId = typeof noteId === 'string' ? noteId.trim() : '';
+  if (!safeNoteId) return;
+  openDashboardDestination({ type: 'note', id: safeNoteId }, options);
 }
 
 function escapeAppleScriptString(value = '') {
@@ -9961,6 +9985,12 @@ function persistSettings() {
   }
 }
 
+function rebuildTrayMenuIfReady() {
+  if (tray && !tray.isDestroyed()) {
+    buildTrayMenu();
+  }
+}
+
 // --- Tray menu ---
 function setProcessingModeFromTray(nextMode = 'local') {
   const targetMode = nextMode === 'pro' ? 'pro' : 'local';
@@ -9989,60 +10019,151 @@ function setProcessingModeFromTray(nextMode = 'local') {
   persistSettings();
 }
 
+const TRAY_RECENT_LIMIT = 3;
+const TRAY_RECENT_TITLE_MAX_LENGTH = 48;
+
+function getTrayTimestamp(entry = {}, preferredKeys = []) {
+  for (const key of preferredKeys) {
+    const value = Number(entry[key] || 0);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+
+function getChatTrayTimestamp(chat = {}) {
+  const messages = Array.isArray(chat.messages) ? chat.messages : [];
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  return Math.max(
+    getTrayTimestamp(lastMessage || {}, ['createdAt', 'updatedAt']),
+    getTrayTimestamp(chat, ['updatedAt', 'createdAt']),
+  );
+}
+
+function getTrayTitle(value, fallback) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  return normalized || fallback;
+}
+
+function truncateTrayTitle(title) {
+  const normalizedTitle = String(title || '').trim();
+  if (normalizedTitle.length <= TRAY_RECENT_TITLE_MAX_LENGTH) {
+    return normalizedTitle;
+  }
+  return `${normalizedTitle.slice(0, TRAY_RECENT_TITLE_MAX_LENGTH - 3).trimEnd()}...`;
+}
+
+function getRecentTrayEntries() {
+  const noteEntries = (Array.isArray(notesData && notesData.notes) ? notesData.notes : [])
+    .filter((note) => note && !note.deletedAt && note.id)
+    .map((note) => ({
+      type: 'note',
+      id: note.id,
+      kindLabel: 'Note',
+      title: getTrayTitle(note.title || note.text, 'Untitled note'),
+      timestamp: getTrayTimestamp(note, ['lastModified', 'updatedAt', 'createdAt']),
+    }));
+  const chatEntries = (Array.isArray(chatsData && chatsData.chats) ? chatsData.chats : [])
+    .filter((chat) => chat && !chat.deletedAt && chat.id)
+    .map((chat) => ({
+      type: 'chat',
+      id: chat.id,
+      kindLabel: 'Chat',
+      title: getTrayTitle(chat.title, 'Untitled chat'),
+      timestamp: getChatTrayTimestamp(chat),
+    }));
+  const recordingEntries = (Array.isArray(recordingsData && recordingsData.recordings) ? recordingsData.recordings : [])
+    .filter((recording) => recording && !recording.deletedAt && recording.id)
+    .map((recording) => ({
+      type: 'recording',
+      id: recording.id,
+      kindLabel: 'Recording',
+      title: getTrayTitle(recording.title || recording.transcript, 'Untitled recording'),
+      timestamp: getTrayTimestamp(recording, ['updatedAt', 'createdAt']),
+    }));
+
+  return [...noteEntries, ...chatEntries, ...recordingEntries]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, TRAY_RECENT_LIMIT);
+}
+
+function buildRecentTrayMenuItems() {
+  const recentEntries = getRecentTrayEntries();
+  const items = [
+    { label: 'Recent', enabled: false },
+  ];
+
+  if (!recentEntries.length) {
+    items.push({ label: 'No recent items', enabled: false });
+    return items;
+  }
+
+  return [
+    ...items,
+    ...recentEntries.map((entry) => ({
+      label: `${entry.kindLabel}: ${truncateTrayTitle(entry.title)}`,
+      click: () => openDashboardDestination({ type: entry.type, id: entry.id }),
+    })),
+  ];
+}
+
+function setStorageDefaultFromTray(nextStorage = 'local') {
+  const targetStorage = nextStorage === 'cloud' ? 'cloud' : 'local';
+  const authState = getAuthState();
+
+  if (targetStorage === 'cloud' && !authState.isLoggedIn) {
+    shell.openExternal(buildLoginUrl());
+    return;
+  }
+
+  settings.syncSettings = {
+    ...(settings.syncSettings || {}),
+    autoSyncEnabled: true,
+    strictPrivacyMode: targetStorage === 'local',
+  };
+  persistSettings();
+  scheduleSyncRun(500);
+}
+
 function buildTrayMenu() {
-  const isRecordCapturing = trayRecordModeStatus === 'capturing';
-  const isRecordProcessing = trayRecordModeStatus === 'processing' || trayRecordModeStatus === 'selecting';
-  const recordLabel = isRecordProcessing
-    ? 'Processing Recording…'
-    : (isRecordCapturing ? 'End Recording' : 'Start Recording');
-  const activeShortcuts = shortcutsRuntimeState.active || {};
-  const dictationHoldShortcut = activeShortcuts.dictationHold || {};
-  const dictationHandsFreeShortcut = activeShortcuts.dictationHandsFree || {};
-  const quickNoteShortcut = activeShortcuts.quickNote || {};
-  const recordModeShortcut = activeShortcuts.recordMode || {};
   const trayAuthState = getAuthState();
-  const cloudModeAvailable = trayAuthState.isLoggedIn === true;
-  const cloudModeSelected = settings?.mode === 'pro';
-  const localModeSelected = !cloudModeSelected;
+  const cloudStorageAvailable = trayAuthState.isLoggedIn === true;
+  const cloudStorageSelected = cloudStorageAvailable && settings?.syncSettings?.strictPrivacyMode !== true;
+  const localStorageSelected = !cloudStorageSelected;
 
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Escribolt', enabled: false },
+    ...buildRecentTrayMenuItems(),
     { type: 'separator' },
     {
-      label: recordLabel,
-      accelerator: recordModeShortcut.accelerator || undefined,
+      label: 'Paste last dictation',
+      accelerator: PASTE_LAST_TRANSCRIPTION_ACCELERATOR,
       enabled: false,
     },
-    { label: `Quick Notes (${quickNoteShortcut.display || 'Unavailable'})`, accelerator: quickNoteShortcut.accelerator || undefined, enabled: false },
+    { type: 'separator' },
     {
-      label: `Dictation Hold (${dictationHoldShortcut.display || 'Unavailable'})`,
-      enabled: false,
+      label: 'Shortcuts',
+      click: () => openDashboardDestination({ type: 'settings', settingsTab: 'shortcuts' }),
     },
     {
-      label: `Dictation Hands-free (${dictationHandsFreeShortcut.display || 'Unavailable'})`,
-      accelerator: dictationHandsFreeShortcut.mode === 'accelerator' ? (dictationHandsFreeShortcut.accelerator || undefined) : undefined,
-      enabled: false,
-    },
-    {
-      label: 'Processing Mode',
+      label: 'Storage Default',
       submenu: [
         {
           label: 'Local',
           type: 'radio',
-          checked: localModeSelected,
-          click: () => setProcessingModeFromTray('local'),
+          checked: localStorageSelected,
+          click: () => setStorageDefaultFromTray('local'),
         },
         {
-          label: cloudModeAvailable ? 'Cloud (PRO)' : 'Cloud (Sign in required)',
+          label: cloudStorageAvailable ? 'Cloud' : 'Cloud (Sign in required)',
           type: 'radio',
-          checked: cloudModeSelected,
-          click: () => setProcessingModeFromTray('pro'),
+          checked: cloudStorageSelected,
+          click: () => setStorageDefaultFromTray('cloud'),
         },
       ],
     },
-    { label: 'Open Dashboard', click: createDashboardWindow },
     { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() },
+    { label: 'Open Escribolt', click: createDashboardWindow },
+    { type: 'separator' },
+    { label: 'Quit Escribolt', click: () => app.quit() },
   ]);
   tray.setContextMenu(contextMenu);
 }
@@ -13167,9 +13288,17 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('get-ui-settings', () => getUiSettings());
+  ipcMain.handle('dashboard:consume-pending-navigation', () => {
+    const destination = pendingDashboardNavigation;
+    pendingDashboardNavigation = null;
+    return normalizeDashboardNavigationDestination(destination || {}) || {};
+  });
   ipcMain.handle('dashboard:consume-pending-note-navigation', () => {
-    const noteId = pendingDashboardNoteNavigationId;
-    pendingDashboardNoteNavigationId = null;
+    const destination = normalizeDashboardNavigationDestination(pendingDashboardNavigation || {});
+    const noteId = destination && destination.type === 'note' ? destination.id : '';
+    if (noteId) {
+      pendingDashboardNavigation = null;
+    }
     return {
       noteId: typeof noteId === 'string' ? noteId : '',
     };

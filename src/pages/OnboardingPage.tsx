@@ -122,6 +122,18 @@ export default function OnboardingPage({
                 console.error('Failed checking screen recording permission:', e);
             }
 
+            // Check Keychain secure storage status
+            try {
+                const result = await ipcRenderer.invoke('byok:get-secure-storage-status');
+                if (result?.status === 'success' && result?.secureStoragePrimed === true) {
+                    setKeychainStatus('primed');
+                } else if (result?.secureStorageAvailable === false) {
+                    setKeychainStatus('denied');
+                }
+            } catch (e) {
+                console.error('Failed checking keychain permission:', e);
+            }
+
             // Check Meeting Prompt status
             try {
                 const result = await ipcRenderer.invoke('meeting-prompt:request-permissions');

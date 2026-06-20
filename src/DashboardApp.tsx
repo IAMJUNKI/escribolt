@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlignLeft, BookOpen, Cloud, Download, Ear, FileText, KeyRound, Keyboard, Link2, Lock, Mic, Save, Search, Settings, Sparkles, Trash2, User, Plus, X, ExternalLink, ChevronDown, PanelLeft, PanelLeftInactive, SlidersHorizontal, Loader2, MessageCircle, Send, Upload, Unlink, Folder as FolderGlyph, FolderPlus, MoreHorizontal, Pin, PinOff, Pencil, RefreshCw } from 'lucide-react';
+import { AlignLeft, BookOpen, Cloud, Ear, FileText, KeyRound, Keyboard, Link2, Lock, Mic, Save, Search, Settings, Sparkles, Trash2, User, Plus, X, ExternalLink, ChevronDown, PanelLeft, PanelLeftInactive, SlidersHorizontal, Loader2, MessageCircle, Send, Upload, Unlink, Folder as FolderGlyph, FolderPlus, MoreHorizontal, Pin, PinOff, Pencil, RefreshCw } from 'lucide-react';
 import {
     Briefcase, Building, Clipboard, Calendar, LayoutList, Award, Trophy, Target, Star, Bookmark, Tag,
     Code, Terminal, Cpu, Database, Globe, Wifi, Key, Shield, Unlock, PenTool, Paintbrush,
@@ -309,6 +309,12 @@ function normalizeUpdateState(rawState: unknown): AppUpdateState {
         progressPercent: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : null,
         errorMessage: String(source.errorMessage || ''),
     };
+}
+
+function formatUpdateVersionLabel(version: string): string {
+    const trimmed = version.trim();
+    if (!trimmed) return '';
+    return trimmed.toLowerCase().startsWith('v') ? trimmed : `v${trimmed}`;
 }
 
 const SIDEBAR_WIDTH_DEFAULT = 288;
@@ -795,7 +801,8 @@ type SyncToast = {
     createdAt: number;
 };
 
-type SettingsTabKey = 'general' | 'account' | 'storageSync' | 'dictation' | 'quickNotes' | 'recordings' | 'chats' | 'ai' | 'shortcuts';
+const SETTINGS_TAB_KEYS = ['general', 'account', 'storageSync', 'dictation', 'quickNotes', 'recordings', 'chats', 'ai', 'shortcuts'] as const;
+type SettingsTabKey = typeof SETTINGS_TAB_KEYS[number];
 type SettingsTabMeta = {
     key: SettingsTabKey;
     label: string;
@@ -803,6 +810,17 @@ type SettingsTabMeta = {
     visible: boolean;
     isolated?: boolean;
 };
+
+type DashboardNavigationPayload = {
+    type?: 'note' | 'recording' | 'chat' | 'settings';
+    id?: string;
+    settingsTab?: string;
+};
+
+function resolveSettingsTabKey(rawTab: unknown): SettingsTabKey | null {
+    const tab = String(rawTab || '').trim();
+    return SETTINGS_TAB_KEYS.includes(tab as SettingsTabKey) ? (tab as SettingsTabKey) : null;
+}
 
 type ShortcutRuntimeOption = {
     id: string;
@@ -3554,29 +3572,83 @@ export default function DashboardApp() {
         void refreshNotesData(noteId);
     }, [openLibraryItemTab, refreshNotesData]);
 
+    const openDashboardNavigationFromMainProcess = useCallback((payload: DashboardNavigationPayload = {}) => {
+        if (payload.type === 'settings') {
+            const targetSettingsTab = resolveSettingsTabKey(payload.settingsTab) || 'general';
+            setActiveSettingsTab(targetSettingsTab);
+            setIsSettingsModalOpen(true);
+            setActiveSection('library');
+            if (targetSettingsTab === 'shortcuts') {
+                void refreshShortcutsRuntime();
+            }
+            return;
+        }
+
+        const itemId = String(payload.id || '').trim();
+        if (!itemId) return;
+
+        if (payload.type === 'note') {
+            openNoteFromMainProcess(itemId);
+            return;
+        }
+
+        if (payload.type === 'recording') {
+            setActiveSection('library');
+            openLibraryItemTab({ type: 'recording', id: itemId }, { activate: true, closeSearch: true });
+            void refreshRecordings(itemId);
+            return;
+        }
+
+        if (payload.type === 'chat') {
+            setActiveSection('library');
+            openLibraryItemTab({ type: 'chat', id: itemId }, { activate: true, closeSearch: true });
+            void refreshChatsData();
+        }
+    }, [
+        openLibraryItemTab,
+        openNoteFromMainProcess,
+        refreshChatsData,
+        refreshRecordings,
+        refreshShortcutsRuntime,
+    ]);
+
     useEffect(() => {
         let mounted = true;
 
         const handleOpenNote = (_event: any, payload: { noteId?: string } = {}) => {
             openNoteFromMainProcess(payload.noteId || '');
         };
+        const handleDashboardNavigation = (_event: any, payload: DashboardNavigationPayload = {}) => {
+            openDashboardNavigationFromMainProcess(payload);
+        };
 
+        ipcRenderer.on('dashboard:navigate', handleDashboardNavigation);
         ipcRenderer.on('dashboard:open-note', handleOpenNote);
 
-        ipcRenderer.invoke('dashboard:consume-pending-note-navigation')
+        ipcRenderer.invoke('dashboard:consume-pending-navigation')
             .then((result: any) => {
                 if (!mounted) return;
-                if (result && typeof result.noteId === 'string') {
-                    openNoteFromMainProcess(result.noteId);
+                if (result && typeof result.type === 'string') {
+                    openDashboardNavigationFromMainProcess(result);
                 }
             })
-            .catch(() => undefined);
+            .catch(() => {
+                ipcRenderer.invoke('dashboard:consume-pending-note-navigation')
+                    .then((result: any) => {
+                        if (!mounted) return;
+                        if (result && typeof result.noteId === 'string') {
+                            openNoteFromMainProcess(result.noteId);
+                        }
+                    })
+                    .catch(() => undefined);
+            });
 
         return () => {
             mounted = false;
+            ipcRenderer.removeListener('dashboard:navigate', handleDashboardNavigation);
             ipcRenderer.removeListener('dashboard:open-note', handleOpenNote);
         };
-    }, [openNoteFromMainProcess]);
+    }, [openDashboardNavigationFromMainProcess, openNoteFromMainProcess]);
 
     const cancelHeaderSpaceCloseTimer = useCallback(() => {
         if (headerSpaceCloseTimerRef.current !== null) {
@@ -6211,23 +6283,15 @@ export default function DashboardApp() {
 	    }, [releaseRecordModeMedia]);
 
         const showUpdateButton = updateState.supported === true
-            && (updateState.status === 'available' || updateState.status === 'downloading' || updateState.status === 'downloaded');
-        const updateProgressPercent = updateState.progressPercent !== null
-            ? Math.round(updateState.progressPercent)
-            : null;
+            && !isUpdateButtonBusy
+            && (updateState.status === 'available' || updateState.status === 'downloaded');
+        const updateVersionLabel = formatUpdateVersionLabel(updateState.availableVersion);
         const updateButtonText = updateState.status === 'downloaded'
             ? 'Restart'
-            : (updateState.status === 'downloading'
-                ? (updateProgressPercent !== null ? `${updateProgressPercent}%` : 'Updating')
-                : 'Update');
-        const updateVersionLabel = updateState.availableVersion
-            ? ` ${updateState.availableVersion}`
-            : '';
+            : 'Update';
         const updateButtonTooltip = updateState.status === 'downloaded'
-            ? `Restart to install Escribolt${updateVersionLabel}`
-            : (updateState.status === 'downloading'
-                ? `Downloading Escribolt${updateVersionLabel}`
-                : `Download Escribolt${updateVersionLabel}`);
+            ? (updateVersionLabel ? `Restart to install ${updateVersionLabel}` : 'Restart to install update')
+            : (updateVersionLabel ? `Update to ${updateVersionLabel}` : 'Update');
 
         const handleUpdateButtonClick = useCallback(async () => {
             if (isUpdateButtonBusy || updateState.status === 'downloading') {
@@ -6258,19 +6322,14 @@ export default function DashboardApp() {
 
         const renderUpdateButton = (compact = false) => {
             if (!showUpdateButton) return null;
-            const Icon = updateState.status === 'downloaded'
-                ? RefreshCw
-                : (updateState.status === 'downloading' ? Loader2 : Download);
-            const disabled = isUpdateButtonBusy || updateState.status === 'downloading';
             return (
                 <HoverTooltip label={updateButtonTooltip}>
                     <button
                         type="button"
                         className={`no-drag inline-flex h-7 items-center justify-center gap-1.5 rounded-md text-[11px] font-semibold transition-all ${
-                            compact ? 'w-7' : 'max-w-full px-2.5'
-                        } ${disabled ? 'cursor-default opacity-80' : 'hover:opacity-90 active:scale-95'}`}
+                            compact ? 'px-2.5' : 'max-w-full px-2.5'
+                        } hover:opacity-90 active:scale-95`}
                         onClick={handleUpdateButtonClick}
-                        disabled={disabled}
                         aria-label={updateButtonTooltip}
                         style={{
                             WebkitAppRegion: 'no-drag',
@@ -6278,8 +6337,7 @@ export default function DashboardApp() {
                             color: '#f8fafc',
                         } as any}
                     >
-                        <Icon size={13} className={`shrink-0 ${updateState.status === 'downloading' ? 'animate-spin' : ''}`} />
-                        {!compact ? <span className="truncate">{updateButtonText}</span> : null}
+                        <span className="truncate">{updateButtonText}</span>
                     </button>
                 </HoverTooltip>
             );
@@ -6890,10 +6948,10 @@ export default function DashboardApp() {
                         >
                             <div className="absolute inset-0 z-0" aria-hidden="true" />
                             <div
-                                className="relative z-10 h-10 w-full inline-flex items-center text-left select-none px-3 pointer-events-none"
+                                className="relative z-10 h-10 w-full flex items-center justify-end text-left select-none px-3 pointer-events-none"
                                 style={{ paddingLeft: `${sidebarTitleInset}px` }}
                             >
-                                <div className="pointer-events-auto">
+                                <div className="pointer-events-auto min-w-0">
                                     {renderUpdateButton(false)}
                                 </div>
                             </div>
