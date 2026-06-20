@@ -397,6 +397,7 @@ let pendingStickyWindowFinalSaveCloses = new Map(); // id -> cancellation handle
 let lastStickyWindowBounds = null;
 let dashboardWindow = null; // Reference to the Unified Dashboard window
 let pendingDashboardNavigation = null;
+let pendingDashboardMenuCommands = [];
 let dashboardRecordModeCommandReady = false;
 let pendingDashboardRecordModeCommand = null;
 let pendingDashboardRecordModeCommandTimer = null;
@@ -7616,7 +7617,7 @@ function createDashboardWindow(options = {}) {
     }
     event.preventDefault();
     try {
-      dashboardWindow.webContents.send('dashboard:shortcut-close-tab-or-app');
+      dashboardWindow.webContents.send('dashboard:menu-command', 'close-tab');
     } catch (_error) {
       // Ignore renderer teardown races.
     }
@@ -7691,6 +7692,114 @@ function openNoteInDashboard(noteId, options = {}) {
   const safeNoteId = typeof noteId === 'string' ? noteId.trim() : '';
   if (!safeNoteId) return;
   openDashboardDestination({ type: 'note', id: safeNoteId }, options);
+}
+
+function sendDashboardMenuCommand(command) {
+  const safeCommand = typeof command === 'string' ? command.trim() : '';
+  if (!safeCommand) return;
+  createDashboardWindow({ show: true, focus: true });
+  if (!dashboardWindow || dashboardWindow.isDestroyed() || dashboardWindow.webContents.isLoading()) {
+    pendingDashboardMenuCommands.push(safeCommand);
+    return;
+  }
+
+  try {
+    dashboardWindow.webContents.send('dashboard:menu-command', safeCommand);
+  } catch (_error) {
+    pendingDashboardMenuCommands.push(safeCommand);
+  }
+}
+
+function installApplicationMenu() {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  const template = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Note',
+          accelerator: 'Command+Shift+N',
+          click: () => sendDashboardMenuCommand('new-note'),
+        },
+        {
+          label: 'New Chat',
+          accelerator: 'Command+N',
+          click: () => sendDashboardMenuCommand('new-chat'),
+        },
+        {
+          label: 'Reopen Last Closed Tab',
+          accelerator: 'Command+Shift+T',
+          click: () => sendDashboardMenuCommand('reopen-last-closed-tab'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Close Tab',
+          accelerator: 'Command+W',
+          click: () => sendDashboardMenuCommand('close-tab'),
+        },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'pasteAndMatchStyle' },
+        { role: 'delete' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { role: 'front' },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function escapeAppleScriptString(value = '') {
@@ -12742,6 +12851,7 @@ function setupChatIpcHandlers() {
 }
 
 app.whenReady().then(async () => {
+  installApplicationMenu();
   if (app.isPackaged) {
     backendPort = await findFreePort(8000);
     console.log(`[backend] Dynamically allocated port: ${backendPort}`);
@@ -13302,6 +13412,11 @@ app.whenReady().then(async () => {
     return {
       noteId: typeof noteId === 'string' ? noteId : '',
     };
+  });
+  ipcMain.handle('dashboard:consume-pending-menu-commands', () => {
+    const commands = pendingDashboardMenuCommands;
+    pendingDashboardMenuCommands = [];
+    return commands;
   });
   ipcMain.handle('shortcuts:get-runtime', () => getShortcutsRuntimePayload());
   ipcMain.handle('dashboard:get-window-state', (event) => {

@@ -16,7 +16,6 @@ import type { UiSettings, AuthState, Note, RecordingItem, RecordModeStatus } fro
 import OnboardingTutorial from './OnboardingTutorial';
 
 const { ipcRenderer } = window.require('electron');
-const COMPLETED_PRODUCT_TOUR_VERSION = 1;
 const PERMISSION_ILLUSTRATION_BASE_URL = `${process.env.PUBLIC_URL || ''}/onboarding-permissions`;
 
 export interface OnboardingPageProps {
@@ -303,7 +302,6 @@ export default function OnboardingPage({
         try {
             await updateSettings({
                 onboardingCompleted: true,
-                productTourVersionSeen: COMPLETED_PRODUCT_TOUR_VERSION,
             });
             onComplete();
         } catch (error) {

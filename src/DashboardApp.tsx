@@ -1485,6 +1485,7 @@ export default function DashboardApp() {
     const sidebarItemMenuRef = useRef<HTMLDivElement | null>(null);
     const moveToFolderPopoverRef = useRef<HTMLDivElement | null>(null);
     const productTourCreatedNoteIdRef = useRef<string | null>(null);
+    const closedLibraryTabsRef = useRef<LibraryTab[]>([]);
     const recordingTranscriptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
     const recordModeSessionIdRef = useRef<string | null>(null);
     const recordModeStreamRef = useRef<MediaStream | null>(null);
@@ -4168,6 +4169,11 @@ export default function DashboardApp() {
         setOpenLibraryTabs((previous) => {
             const closingIndex = previous.findIndex((entry) => getLibraryTabKey(entry) === closeKey);
             if (closingIndex < 0) return previous;
+            const closedTab = previous[closingIndex];
+            closedLibraryTabsRef.current = [
+                closedTab,
+                ...closedLibraryTabsRef.current.filter((entry) => getLibraryTabKey(entry) !== closeKey),
+            ].slice(0, 20);
             const nextTabs = previous.filter((entry) => getLibraryTabKey(entry) !== closeKey);
 
             if (activeLibraryTabKey === closeKey) {
@@ -4200,6 +4206,39 @@ export default function DashboardApp() {
         });
     }, [activeLibraryTabKey]);
 
+    const reopenLastClosedLibraryTab = useCallback(() => {
+        const validKeys = new Set([
+            ...allLibraryItems.map((item) => getLibraryTabKey(item)),
+            ...chatsData.chats.map((chat) => getLibraryTabKey({ type: 'ask', id: chat.id })),
+            getLibraryTabKey({ type: 'ask', id: 'global' }),
+        ]);
+        while (closedLibraryTabsRef.current.length > 0) {
+            const tab = closedLibraryTabsRef.current.shift();
+            if (!tab) continue;
+            const tabKey = getLibraryTabKey(tab);
+            if (!validKeys.has(tabKey)) continue;
+            setOpenLibraryTabs((previous) => (
+                previous.some((entry) => getLibraryTabKey(entry) === tabKey)
+                    ? previous
+                    : [...previous, tab]
+            ));
+            setHasInitializedLibraryTabs(true);
+            setActiveLibraryTabKey(tabKey);
+            setActiveSection('library');
+            setIsLibrarySearchOpen(false);
+            if (tab.type === 'ask') {
+                setSelectedLibraryItem(null);
+                setSelectedRecordingId(null);
+            } else {
+                setSelectedLibraryItem({ type: tab.type, id: tab.id });
+                if (tab.type === 'recording') {
+                    setSelectedRecordingId(tab.id);
+                }
+            }
+            return;
+        }
+    }, [allLibraryItems, chatsData.chats]);
+
     const handleTabDragStart = useCallback((e: React.DragEvent, key: string) => {
         setDraggedTabKey(key);
         e.dataTransfer.effectAllowed = 'move';
@@ -4229,28 +4268,6 @@ export default function DashboardApp() {
     const handleTabDragEnd = useCallback(() => {
         setDraggedTabKey(null);
     }, []);
-
-    const closeActiveLibraryTabOrApp = useCallback(() => {
-        if (openLibraryTabs.length > 0) {
-            const activeTab = openLibraryTabs.find((tab) => getLibraryTabKey(tab) === activeLibraryTabKey)
-                || openLibraryTabs[openLibraryTabs.length - 1];
-            if (activeTab) {
-                closeLibraryTab(activeTab);
-                return;
-            }
-        }
-        void ipcRenderer.invoke('dashboard:close-app');
-    }, [activeLibraryTabKey, closeLibraryTab, openLibraryTabs]);
-
-    useEffect(() => {
-        const handleShortcutCloseTabOrApp = () => {
-            closeActiveLibraryTabOrApp();
-        };
-        ipcRenderer.on('dashboard:shortcut-close-tab-or-app', handleShortcutCloseTabOrApp);
-        return () => {
-            ipcRenderer.removeListener('dashboard:shortcut-close-tab-or-app', handleShortcutCloseTabOrApp);
-        };
-    }, [closeActiveLibraryTabOrApp]);
 
     useEffect(() => {
         if (!selectedLibraryItem) {
@@ -4807,6 +4824,60 @@ export default function DashboardApp() {
         openLibraryItemTab,
         settings.stickyNoteDefaultColorId,
         settings.syncSettings?.strictPrivacyMode,
+    ]);
+
+    useEffect(() => {
+        const closeActiveLibraryTab = () => {
+            if (openLibraryTabs.length <= 0) return;
+            const activeTab = openLibraryTabs.find((tab) => getLibraryTabKey(tab) === activeLibraryTabKey)
+                || openLibraryTabs[openLibraryTabs.length - 1];
+            if (activeTab) {
+                closeLibraryTab(activeTab);
+            }
+        };
+        const runDashboardMenuCommand = (command: string) => {
+            switch (command) {
+                case 'new-note':
+                    createNewLibraryNote();
+                    break;
+                case 'new-chat':
+                    openAskTab();
+                    break;
+                case 'reopen-last-closed-tab':
+                    reopenLastClosedLibraryTab();
+                    break;
+                case 'close-tab':
+                    closeActiveLibraryTab();
+                    break;
+                default:
+                    break;
+            }
+        };
+        const handleDashboardMenuCommand = (_event: any, command: string) => {
+            runDashboardMenuCommand(command);
+        };
+
+        ipcRenderer.on('dashboard:menu-command', handleDashboardMenuCommand);
+        ipcRenderer.invoke('dashboard:consume-pending-menu-commands')
+            .then((commands: unknown) => {
+                if (!Array.isArray(commands)) return;
+                commands.forEach((command) => {
+                    if (typeof command === 'string') {
+                        runDashboardMenuCommand(command);
+                    }
+                });
+            })
+            .catch(() => undefined);
+        return () => {
+            ipcRenderer.removeListener('dashboard:menu-command', handleDashboardMenuCommand);
+        };
+    }, [
+        activeLibraryTabKey,
+        closeLibraryTab,
+        createNewLibraryNote,
+        openAskTab,
+        openLibraryTabs,
+        reopenLastClosedLibraryTab,
     ]);
 
     const deleteNoteById = useCallback((noteId: string, title: string = 'Untitled note') => {
