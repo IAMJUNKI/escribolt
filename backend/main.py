@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .recorder import AudioRecorder
-from .text_service import paste_text, type_text
+from .text_service import paste_text, type_text, warm_macos_paste_shortcut
 
 app = FastAPI()
 
@@ -444,7 +444,7 @@ async def on_startup():
     
     # Speculative microphone warm-up on startup has been disabled to prevent triggering the macOS microphone permission prompt immediately on app launch.
     # It will instead be initialized dynamically on demand when recording is requested.
-    pass
+    warm_macos_paste_shortcut()
 
 
 

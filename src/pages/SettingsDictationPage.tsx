@@ -72,9 +72,9 @@ export default function SettingsDictationPage({
     updateSettings,
 }: SettingsDictationPageProps) {
     const processing = useProcessingSettings({ settings, authState, updateSettings });
-    const isLocalMode = settings.mode === 'local';
+    const isLocalSpeechRoute = processing.selectedProcessingLocation('dictation') === 'local';
     const isDeepgramStt = settings.aiEngine.sttProvider === 'deepgram';
-    const canUseStreaming = !isLocalMode && isDeepgramStt;
+    const canUseStreaming = !isLocalSpeechRoute && isDeepgramStt;
     const areStreamingControlsDisabled = !canUseStreaming;
     const selectedStreamingProfile: SttStreamingProfile = settings.aiEngine.sttStreamingProfile === 'nova3-monolingual'
         ? 'nova3-monolingual'
@@ -149,7 +149,7 @@ export default function SettingsDictationPage({
     }, [canUseStreaming]);
 
     React.useEffect(() => {
-        if (!isLocalMode) {
+        if (!isLocalSpeechRoute) {
             setLocalSttStatus(null);
             return undefined;
         }
@@ -159,10 +159,10 @@ export default function SettingsDictationPage({
 
         const poll = async (warm = false) => {
             const status = await refreshLocalSttStatus(warm);
-            if (!cancelled && status.warming) {
+            if (!cancelled && !status.available && status.status !== 'error') {
                 pollTimer = window.setTimeout(() => {
-                    void poll(false);
-                }, 5000);
+                    void poll(!status.warming);
+                }, status.warming ? 5000 : 1000);
             } else if (!cancelled) {
                 if (pollTimer) {
                     window.clearTimeout(pollTimer);
@@ -179,7 +179,23 @@ export default function SettingsDictationPage({
                 window.clearTimeout(pollTimer);
             }
         };
-    }, [isLocalMode, refreshLocalSttStatus]);
+    }, [isLocalSpeechRoute, refreshLocalSttStatus]);
+
+    React.useEffect(() => {
+        if (!isLocalSpeechRoute) return undefined;
+        const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
+        if (!ipcRenderer) return undefined;
+
+        const handleLocalSttStatusChanged = (_event: any, payload: any = {}) => {
+            if (!payload?.localStt) return;
+            setLocalSttStatus(normalizeLocalSttStatus(payload.localStt));
+        };
+
+        ipcRenderer.on('runtime:local-stt-status-changed', handleLocalSttStatusChanged);
+        return () => {
+            ipcRenderer.removeListener('runtime:local-stt-status-changed', handleLocalSttStatusChanged);
+        };
+    }, [isLocalSpeechRoute]);
 
     const updateKeyterms = (nextTerms: string[]) => {
         const normalized = normalizeKeytermsList(nextTerms);
@@ -249,7 +265,7 @@ export default function SettingsDictationPage({
                 {processing.message ? (
                     <div className="py-2 text-xs es-general-secondary-text">{processing.message}</div>
                 ) : null}
-                {isLocalMode ? (
+                {isLocalSpeechRoute ? (
                     <SettingsRow
                         title="Local speech"
                         description={localStatusMeta ? `${localStatusDescription} ${localStatusMeta}.` : localStatusDescription}

@@ -15,6 +15,7 @@ K_CG_EVENT_FLAG_MASK_COMMAND = 0x00100000
 
 _COREGRAPHICS = None
 _COREFOUNDATION = None
+_MAC_PASTE_SHORTCUT_WARMED = False
 
 def _check_macos_accessibility():
     """Check if the app has Accessibility permissions on macOS."""
@@ -92,6 +93,32 @@ def _paste_shortcut_macos():
                 pass
 
 
+def warm_macos_paste_shortcut(force=False):
+    """Prime macOS keyboard event synthesis without typing visible text."""
+    global _MAC_PASTE_SHORTCUT_WARMED
+    if not IS_MAC:
+        return True
+    if _MAC_PASTE_SHORTCUT_WARMED and not force:
+        return True
+
+    command_down = False
+    try:
+        _post_macos_key_event(MAC_KEY_COMMAND, True, K_CG_EVENT_FLAG_MASK_COMMAND)
+        command_down = True
+        time.sleep(0.03)
+        _MAC_PASTE_SHORTCUT_WARMED = True
+        return True
+    except Exception as exc:
+        print(f"[paste] macOS shortcut warmup failed: {exc}")
+        return False
+    finally:
+        if command_down:
+            try:
+                _post_macos_key_event(MAC_KEY_COMMAND, False, 0)
+            except Exception:
+                pass
+
+
 def _paste_shortcut():
     if IS_MAC:
         _paste_shortcut_macos()
@@ -120,6 +147,8 @@ def paste_text(text):
     try:
         _copy_clipboard_and_wait(text)
         time.sleep(0.08)
+        warm_macos_paste_shortcut(force=True)
+        time.sleep(0.04)
         _paste_shortcut()
         time.sleep(0.5)
     finally:

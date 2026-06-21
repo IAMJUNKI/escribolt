@@ -9135,8 +9135,9 @@ function normalizeLocalSttRuntimeStatus(raw = {}) {
 
 function updateLocalSttRuntimeStatus(raw = {}) {
   localSttRuntimeStatus = normalizeLocalSttRuntimeStatus(raw);
+  emitLocalSttRuntimeStatus();
   if (localSttRuntimeStatus.warming) {
-    scheduleLocalSttStatusPoll();
+    scheduleLocalSttStatusPoll(localSttRuntimeStatus.stage === 'starting' ? 1000 : LOCAL_STT_STATUS_POLL_MS);
   }
   return localSttRuntimeStatus;
 }
@@ -9155,19 +9156,67 @@ function isCurrentSttRouteLocal() {
 
 function getLocalSttUnavailableMessage(status = localSttRuntimeStatus) {
   if (status && status.warming) {
-    return LOCAL_STT_PREPARING_MESSAGE;
+    return status.message || LOCAL_STT_PREPARING_MESSAGE;
   }
   if (status && status.status === 'error' && status.message) {
+    return status.message;
+  }
+  if (status && status.message) {
     return status.message;
   }
   return 'Local speech is not ready yet. Keep Escribolt open while it finishes preparing.';
 }
 
-async function refreshLocalSttRuntimeStatus({ startWarmup = false, background = true } = {}) {
+function shouldStartLocalSttWarmupForStatus(status = localSttRuntimeStatus) {
+  return isCurrentSttRouteLocal()
+    && status.available !== true
+    && status.warming !== true
+    && status.status !== 'ready'
+    && status.status !== 'error';
+}
+
+function getLocalSpeechRuntimePayload(status = localSttRuntimeStatus) {
+  return {
+    isLocalRoute: isCurrentSttRouteLocal(),
+    status: status.status,
+    available: status.available === true,
+    warming: status.warming === true,
+    message: status.available === true
+      ? (status.message || 'Local speech is ready.')
+      : getLocalSttUnavailableMessage(status),
+    stage: status.stage || null,
+    model: status.model || null,
+    durationMs: Number.isFinite(Number(status.durationMs)) ? Number(status.durationMs) : null,
+  };
+}
+
+function emitLocalSttRuntimeStatus() {
+  const payload = {
+    localStt: localSttRuntimeStatus,
+    localSpeech: getLocalSpeechRuntimePayload(localSttRuntimeStatus),
+  };
+  [dashboardWindow, mainWindow].forEach((win) => {
+    if (!win || win.isDestroyed()) {
+      return;
+    }
+    try {
+      win.webContents.send('runtime:local-stt-status-changed', payload);
+    } catch (_error) {
+      // Renderer windows may close while the background warm-up reports progress.
+    }
+  });
+}
+
+async function refreshLocalSttRuntimeStatus({ startWarmup = false, background = true, warmIfIdle = false } = {}) {
   const result = startWarmup
     ? await postToBackendAsync('/runtime/local-stt/warm', { background })
     : await postToBackendAsync('/runtime/local-stt/status', {});
-  return updateLocalSttRuntimeStatus(result && result.localStt ? result.localStt : result);
+  let status = updateLocalSttRuntimeStatus(result && result.localStt ? result.localStt : result);
+  if (warmIfIdle && shouldStartLocalSttWarmupForStatus(status)) {
+    const warmResult = await postToBackendAsync('/runtime/local-stt/warm', { background: true });
+    status = updateLocalSttRuntimeStatus(warmResult && warmResult.localStt ? warmResult.localStt : warmResult);
+  }
+  return status;
 }
 
 function scheduleLocalSttStatusPoll(delayMs = LOCAL_STT_STATUS_POLL_MS) {
@@ -10302,15 +10351,7 @@ function getShortcutsRuntimePayload() {
       fnListenerAvailable,
       fnListenerReason,
     },
-    localSpeech: {
-      isLocalRoute: isCurrentSttRouteLocal(),
-      status: localSttRuntimeStatus.status,
-      available: localSttRuntimeStatus.available === true,
-      warming: localSttRuntimeStatus.warming === true,
-      message: localSttRuntimeStatus.available === true
-        ? (localSttRuntimeStatus.message || 'Local speech is ready.')
-        : getLocalSttUnavailableMessage(localSttRuntimeStatus),
-    },
+    localSpeech: getLocalSpeechRuntimePayload(localSttRuntimeStatus),
   };
 }
 
@@ -14263,7 +14304,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-stt-routing-preview', (_event, options = {}) => getSttRoutingPreview(options));
   ipcMain.handle('runtime:local-stt-status', async () => {
     try {
-      const status = await refreshLocalSttRuntimeStatus();
+      const status = await refreshLocalSttRuntimeStatus({ warmIfIdle: true });
       return { status: 'success', localStt: status };
     } catch (error) {
       return {

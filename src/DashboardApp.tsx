@@ -861,6 +861,16 @@ type ShortcutsRuntimeStatus = {
         fnListenerAvailable: boolean;
         fnListenerReason: string;
     };
+    localSpeech?: {
+        isLocalRoute?: boolean;
+        status?: string;
+        available?: boolean;
+        warming?: boolean;
+        message?: string;
+        stage?: string | null;
+        model?: string | null;
+        durationMs?: number | null;
+    };
 };
 
 function getLibraryTabKey(tab: Pick<LibraryTab, 'type' | 'id'> | null | undefined): string {
@@ -1878,11 +1888,26 @@ export default function DashboardApp() {
         };
         ipcRenderer.on('updates:state', handleUpdateState);
 
+        const handleLocalSttStatusChanged = (_event: any, payload: any = {}) => {
+            if (!mounted || !payload?.localSpeech) return;
+            setShortcutsRuntime((previous) => previous
+                ? {
+                    ...previous,
+                    localSpeech: {
+                        ...(previous.localSpeech || {}),
+                        ...payload.localSpeech,
+                    },
+                }
+                : previous);
+        };
+        ipcRenderer.on('runtime:local-stt-status-changed', handleLocalSttStatusChanged);
+
         return () => {
             mounted = false;
             ipcRenderer.removeListener('ui-settings-updated', handleExternalSettingsUpdate);
             ipcRenderer.removeListener('auth-state-updated', handleAuthStateUpdate);
             ipcRenderer.removeListener('updates:state', handleUpdateState);
+            ipcRenderer.removeListener('runtime:local-stt-status-changed', handleLocalSttStatusChanged);
         };
     }, []);
 

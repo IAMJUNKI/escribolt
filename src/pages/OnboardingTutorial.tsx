@@ -37,6 +37,7 @@ type ShortcutRuntimeStatus = {
         warming?: boolean;
         status?: string;
         message?: string;
+        stage?: string | null;
     };
 };
 
@@ -113,6 +114,15 @@ function formatDictationTutorialLabel(active: ShortcutRuntimeStatus['active'] | 
     return 'Hold Fn or press Fn+Space';
 }
 
+function formatLocalSpeechPromptLabel(localSpeech: ShortcutRuntimeStatus['localSpeech'] | undefined) {
+    if (!localSpeech || localSpeech.available === true) return undefined;
+    if (localSpeech.status === 'error') return 'Needs retry';
+    if (localSpeech.stage === 'loading-model') return 'Loading model';
+    if (localSpeech.stage === 'dummy-inference') return 'Warming up';
+    if (localSpeech.stage === 'importing-runtime') return 'Loading runtime';
+    return 'Preparing model';
+}
+
 export default function OnboardingTutorial({
     notes,
     recordings,
@@ -163,8 +173,13 @@ export default function OnboardingTutorial({
             quickNote: normalizeShortcutLabel(active.quickNote?.display, 'Control+N'),
         };
     }, [shortcutsRuntime]);
-    const localSpeechPreparing = shortcutsRuntime?.localSpeech?.isLocalRoute === true
-        && shortcutsRuntime?.localSpeech?.available !== true;
+    const localSpeech = shortcutsRuntime?.localSpeech;
+    const localSpeechPreparing = localSpeech?.isLocalRoute === true
+        && localSpeech.available !== true
+        && localSpeech.status !== 'error';
+    const localSpeechIdleLabel = localSpeech?.isLocalRoute === true
+        ? formatLocalSpeechPromptLabel(localSpeech)
+        : undefined;
 
     const markComplete = useCallback((stepId: TutorialStepId) => {
         setCompletion((previous) => previous[stepId] ? previous : { ...previous, [stepId]: true });
@@ -606,8 +621,8 @@ export default function OnboardingTutorial({
                     <ShortcutPrompt
                         label={shortcutLabels.dictation}
                         state={isVoiceBusy ? voiceStatus.state : undefined}
-                        idleLabel={localSpeechPreparing ? 'Preparing model' : undefined}
-                        idleTone={localSpeechPreparing ? 'warning' : undefined}
+                        idleLabel={localSpeechIdleLabel}
+                        idleTone={localSpeechIdleLabel ? 'warning' : undefined}
                     />
                     <textarea
                         ref={dictationInputRef}
