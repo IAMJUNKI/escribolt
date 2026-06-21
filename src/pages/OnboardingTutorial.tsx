@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
     Check,
     ChevronLeft,
@@ -739,7 +741,7 @@ export default function OnboardingTutorial({
                                     {summaryError}
                                 </div>
                             ) : null}
-                            {summaryText ? <ResultPreview title="Summary" body={summaryText} /> : null}
+                            {summaryText ? <ResultPreview title="Summary" body={summaryText} markdown /> : null}
                         </>
                     )}
                 </div>
@@ -933,13 +935,23 @@ function ShortcutPrompt({
     );
 }
 
-function ResultPreview({ title, body }: { title: string; body: string }) {
+function ResultPreview({ title, body, markdown = false }: { title: string; body: string; markdown?: boolean }) {
+    const content = body || 'Waiting for content...';
+
     return (
         <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4">
             <div className="text-[10px] font-black uppercase tracking-[0.18em] es-general-secondary-text">{title}</div>
-            <div className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed es-general-text">
-                {body || 'Waiting for content...'}
-            </div>
+            {markdown ? (
+                <div className="mt-2 max-h-44 overflow-y-auto text-sm leading-relaxed es-md-prose es-general-text">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url}>
+                        {content}
+                    </ReactMarkdown>
+                </div>
+            ) : (
+                <div className="mt-2 max-h-44 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed es-general-text">
+                    {content}
+                </div>
+            )}
         </div>
     );
 }

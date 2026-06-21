@@ -13500,12 +13500,15 @@ app.whenReady().then(async () => {
     }
     return { success: false };
   });
-  ipcMain.handle('screen:get-access-status', async () => {
+  ipcMain.handle('screen:get-access-status', async (_event, options = {}) => {
     if (process.platform !== 'darwin') {
       return { status: 'granted', platform: process.platform };
     }
     try {
       if (resolveNativeMacLoopbackHelperPath()) {
+        if (options && options.refresh === true) {
+          return await runNativeMacSystemAudioPermissionProbe({ timeoutMs: 5000 });
+        }
         return getNativeMacSystemAudioPermissionStatus();
       }
       if (!ENABLE_EXPERIMENTAL_ELECTRON_MAC_LOOPBACK) {

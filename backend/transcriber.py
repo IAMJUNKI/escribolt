@@ -1,9 +1,11 @@
 import gc
 import importlib
+import json
 import os
 import tempfile
 import time
 import wave
+from pathlib import Path
 from threading import Lock
 from types import ModuleType
 from typing import Callable, Optional
@@ -40,21 +42,118 @@ class Transcriber:
         except Exception:
             pass
 
-    def _has_cached_model_weights(self):
-        if os.path.exists(self.model_path):
-            return True
+    def _find_cached_model_weights_file(self):
         try:
             hub = importlib.import_module("huggingface_hub")
             try_to_load_from_cache = getattr(hub, "try_to_load_from_cache", None)
             if not callable(try_to_load_from_cache):
-                return False
+                return None
             for filename in ("model.safetensors", "weights.safetensors", "weights.npz"):
                 cached_path = try_to_load_from_cache(self.model_path, filename)
                 if isinstance(cached_path, str) and os.path.exists(cached_path):
-                    return True
+                    return cached_path
         except Exception:
-            return False
-        return False
+            return None
+        return None
+
+    def _resolve_model_load_path(self):
+        if os.path.exists(self.model_path):
+            return self.model_path, True
+
+        cached_weights_file = self._find_cached_model_weights_file()
+        if cached_weights_file:
+            return Path(cached_weights_file).parent, True
+
+        return self.model_path, False
+
+    def _has_cached_model_weights(self):
+        if os.path.exists(self.model_path):
+            return True
+        return self._find_cached_model_weights_file() is not None
+
+    def _is_whisper_model(self):
+        return "whisper" in str(self.model_path or "").lower()
+
+    def _install_whisper_timing_placeholder(self):
+        if os.environ.get("ESCRIBOLT_OPTIMIZE_WHISPER_IMPORTS", "1") == "0":
+            return
+
+        import sys
+        import types
+
+        module_name = "mlx_audio.stt.models.whisper.timing"
+        if module_name in sys.modules:
+            return
+
+        timing_module = types.ModuleType(module_name)
+
+        def add_word_timestamps(*args, **kwargs):
+            raise TranscriberRuntimeError(
+                "Word-level timestamps are unavailable in the optimized local speech loader."
+            )
+
+        timing_module.add_word_timestamps = add_word_timestamps
+        sys.modules[module_name] = timing_module
+
+    def _load_cached_whisper_model(self, model_path):
+        timings = {}
+
+        def mark(name, started_at):
+            timings[name] = round((time.monotonic() - started_at) * 1000.0, 2)
+
+        model_dir = Path(model_path)
+        self._install_whisper_timing_placeholder()
+        started = time.monotonic()
+        whisper_module = importlib.import_module("mlx_audio.stt.models.whisper.whisper")
+        mx = importlib.import_module("mlx.core")
+        nn = importlib.import_module("mlx.nn")
+        mlx_utils = importlib.import_module("mlx.utils")
+        mark("importsMs", started)
+
+        started = time.monotonic()
+        with open(str(model_dir / "config.json"), "r") as config_file:
+            config = json.loads(config_file.read())
+        config.pop("model_type", None)
+        quantization = config.pop("quantization", None)
+        model_args = whisper_module.ModelDimensions(**config)
+        mark("configMs", started)
+
+        weights_path = model_dir / "model.safetensors"
+        if not weights_path.exists():
+            weights_path = model_dir / "weights.safetensors"
+        if not weights_path.exists():
+            weights_path = model_dir / "weights.npz"
+        if not weights_path.exists():
+            raise FileNotFoundError(f"No local Whisper weights found in {model_dir}")
+
+        started = time.monotonic()
+        weights = mx.load(str(weights_path))
+        mark("weightsLoadMs", started)
+
+        started = time.monotonic()
+        model = whisper_module.Model(model_args, mx.float16)
+        mark("constructMs", started)
+
+        if quantization is not None:
+            started = time.monotonic()
+            class_predicate = (
+                lambda path, module: isinstance(module, (nn.Linear, nn.Embedding))
+                and f"{path}.scales" in weights
+            )
+            nn.quantize(model, **quantization, class_predicate=class_predicate)
+            mark("quantizeMs", started)
+
+        started = time.monotonic()
+        model.update(mlx_utils.tree_unflatten(list(weights.items())))
+        model._model_path = model_dir
+        mark("updateMs", started)
+
+        started = time.monotonic()
+        mx.eval(model.parameters())
+        mark("evalMs", started)
+
+        print(f"[transcriber] direct Whisper load timings: {json.dumps(timings, separators=(',', ':'))}")
+        return model
 
     def _ensure_runtime(self, on_status: Optional[Callable[[str, str], None]] = None):
         if self._mlx_audio_stt_utils is None:
@@ -80,7 +179,7 @@ class Transcriber:
         if not callable(load_model):
             raise TranscriberRuntimeError("mlx_audio.stt.utils.load_model is unavailable")
         started = time.monotonic()
-        cached = self._has_cached_model_weights()
+        load_path, cached = self._resolve_model_load_path()
         action = "Loading cached" if cached else "Downloading and loading"
         setup_note = (
             "This app session still needs a warm-up pass."
@@ -92,7 +191,12 @@ class Transcriber:
             "loading-model",
             f"{action} {self.model_path}. {setup_note}",
         )
-        self._model = load_model(self.model_path)
+        if cached and load_path != self.model_path:
+            print(f"[transcriber] resolved cached model snapshot: {load_path}")
+        if cached and isinstance(load_path, Path) and self._is_whisper_model():
+            self._model = self._load_cached_whisper_model(load_path)
+        else:
+            self._model = load_model(load_path)
         self._loaded_model_path = self.model_path
         duration_ms = round((time.monotonic() - started) * 1000.0, 2)
         self._emit_status(

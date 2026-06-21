@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import wave
+from pathlib import Path
 from unittest.mock import patch
 
 from backend.transcriber import Transcriber, TranscriberRuntimeError
@@ -97,6 +98,39 @@ class TranscriberTests(unittest.TestCase):
         self.assertEqual(seen["sample_rate"], 16000)
         self.assertEqual(seen["frames"], 8000)
         self.assertEqual(fake_utils.load_calls, [LOCAL_STT_MODEL])
+
+    def test_cached_whisper_snapshot_uses_direct_local_loader(self):
+        fake_model = FakeSttModule(result={"text": "cached local model"})
+        fake_utils = FakeUtilsModule(fake_model)
+
+        with tempfile.TemporaryDirectory() as snapshot_dir:
+            weights_path = os.path.join(snapshot_dir, "model.safetensors")
+            with open(weights_path, "wb") as weights_file:
+                weights_file.write(b"weights")
+
+            class FakeHubModule:
+                @staticmethod
+                def try_to_load_from_cache(model_path, filename):
+                    if model_path == LOCAL_STT_MODEL and filename == "model.safetensors":
+                        return weights_path
+                    return None
+
+            def import_module(name):
+                if name == "mlx_audio.stt.utils":
+                    return fake_utils
+                if name == "huggingface_hub":
+                    return FakeHubModule
+                raise ImportError(name)
+
+            with patch("backend.transcriber.importlib.import_module", side_effect=import_module):
+                with patch.object(Transcriber, "_load_cached_whisper_model", return_value=fake_model) as load_cached:
+                    transcriber = Transcriber(model_path=LOCAL_STT_MODEL)
+                    with tempfile.NamedTemporaryFile(suffix=".wav") as audio_file:
+                        text = transcriber.transcribe(audio_file.name)
+
+        self.assertEqual(text, "cached local model")
+        self.assertEqual(fake_utils.load_calls, [])
+        load_cached.assert_called_once_with(Path(snapshot_dir))
 
     def test_transcribe_extracts_string_result_text(self):
         fake_model = FakeSttModule(result="  plain string result  ")

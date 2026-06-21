@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
     Mic, 
     Accessibility, 
@@ -67,6 +67,7 @@ export default function OnboardingPage({
 
     const [keychainStatus, setKeychainStatus] = useState<'unknown' | 'primed' | 'denied'>('unknown');
     const [keychainLoading, setKeychainLoading] = useState(false);
+    const screenPermissionRefreshInFlightRef = useRef(false);
 
     // General submission state
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -152,16 +153,30 @@ export default function OnboardingPage({
                 setFnListenerMessage('');
             }
 
-            // Check System Audio Recording status
-            try {
-                const result = await ipcRenderer.invoke('screen:get-access-status');
-                const status = String(result?.status || 'unknown').toLowerCase();
-                if (status === 'granted') setScreenStatus('granted');
-                else if (status === 'denied' || status === 'restricted') setScreenStatus('denied');
-                else if (status === 'not-determined') setScreenStatus('not-determined');
-                else setScreenStatus('unknown');
-            } catch (e) {
-                console.error('Failed checking system audio recording permission:', e);
+            // Check System Audio Recording status only once the user reaches that step.
+            // The refresh path runs the native helper briefly so an already-granted
+            // permission is detected after reopening the app.
+            if (latestAccessibilityStatus === 'granted' && fnListenerStatus === 'granted') {
+                const shouldRefreshScreenStatus = activeSubStep === 'screen' && !screenPermissionRefreshInFlightRef.current;
+                if (shouldRefreshScreenStatus) {
+                    screenPermissionRefreshInFlightRef.current = true;
+                }
+                try {
+                    const result = await ipcRenderer.invoke('screen:get-access-status', {
+                        refresh: shouldRefreshScreenStatus,
+                    });
+                    const status = String(result?.status || 'unknown').toLowerCase();
+                    if (status === 'granted') setScreenStatus('granted');
+                    else if (status === 'denied' || status === 'restricted') setScreenStatus('denied');
+                    else if (status === 'not-determined') setScreenStatus('not-determined');
+                    else setScreenStatus('unknown');
+                } catch (e) {
+                    console.error('Failed checking system audio recording permission:', e);
+                } finally {
+                    if (shouldRefreshScreenStatus) {
+                        screenPermissionRefreshInFlightRef.current = false;
+                    }
+                }
             }
 
             // Check Keychain secure storage status
@@ -176,17 +191,8 @@ export default function OnboardingPage({
                 console.error('Failed checking keychain permission:', e);
             }
 
-            // Check Meeting Prompt status
-            try {
-                const result = await ipcRenderer.invoke('meeting-prompt:request-permissions');
-                if (result?.status === 'success' || result?.canEnable === true) {
-                    setMeetingsStatus('granted');
-                } else {
-                    setMeetingsStatus('denied');
-                }
-            } catch (e) {
-                console.error('Failed checking meeting permissions:', e);
-            }
+            // Meeting detection is optional and its permission check can itself prompt macOS.
+            // Only request it when the user enables that permission step.
         };
 
         checkPermissions();
@@ -198,7 +204,7 @@ export default function OnboardingPage({
         return () => {
             if (timer) clearInterval(timer);
         };
-    }, [step, refreshFnListenerAccess, fnListenerStatus]);
+    }, [step, activeSubStep, refreshFnListenerAccess, fnListenerStatus]);
 
     // Auto-advance sub-steps as they get completed
     useEffect(() => {
@@ -242,12 +248,18 @@ export default function OnboardingPage({
     const requestAccessibilityAccess = async () => {
         setAccessibilityLoading(true);
         try {
-            await ipcRenderer.invoke('accessibility:request-access');
-            await ipcRenderer.invoke('accessibility:open-settings');
+            const result = await ipcRenderer.invoke('accessibility:request-access');
+            const status = String(result?.status || 'unknown').toLowerCase();
+            if (status === 'granted') {
+                setAccessibilityStatus('granted');
+            } else if (status === 'denied' || status === 'restricted') {
+                setAccessibilityStatus('denied');
+            } else {
+                setAccessibilityStatus('unknown');
+            }
         } catch (error) {
             console.error('Failed to request accessibility access:', error);
             setAccessibilityStatus('denied');
-            await ipcRenderer.invoke('accessibility:open-settings');
         } finally {
             setAccessibilityLoading(false);
         }
@@ -262,12 +274,10 @@ export default function OnboardingPage({
                 setFnListenerStatus('granted');
             } else {
                 setFnListenerStatus('denied');
-                await ipcRenderer.invoke('input-monitoring:open-settings');
             }
         } catch (error) {
             console.error('Failed to request input monitoring access:', error);
             setFnListenerStatus('denied');
-            await ipcRenderer.invoke('input-monitoring:open-settings');
         } finally {
             setInputMonitoringLoading(false);
         }
@@ -281,14 +291,16 @@ export default function OnboardingPage({
             const status = String(result?.status || 'unknown').toLowerCase();
             if (status === 'granted') {
                 setScreenStatus('granted');
-            } else {
+            } else if (status === 'denied' || status === 'restricted') {
                 setScreenStatus('denied');
-                await ipcRenderer.invoke('screen:open-settings');
+            } else if (status === 'not-determined') {
+                setScreenStatus('not-determined');
+            } else {
+                setScreenStatus('unknown');
             }
         } catch (error) {
             console.error('Failed to request system audio recording access:', error);
             setScreenStatus('denied');
-            await ipcRenderer.invoke('screen:open-settings');
         } finally {
             setScreenLoading(false);
         }
@@ -774,10 +786,22 @@ export default function OnboardingPage({
                                                                 onClick={(e) => {
                                                                      e.stopPropagation();
                                                                      requestAccessibilityAccess();
-                                                                 }}
+                                                                }}
                                                                 className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
                                                             >
-                                                                {accessibilityLoading ? 'Opening...' : 'Allow Accessibility'}
+                                                                {accessibilityLoading ? 'Requesting...' : 'Allow Accessibility'}
+                                                            </button>
+                                                        )}
+                                                        {accessibilityStatus === 'denied' && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    ipcRenderer.invoke('accessibility:open-settings');
+                                                                }}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text"
+                                                            >
+                                                                Open System Settings
                                                             </button>
                                                         )}
                                                         {accessibilityStatus === 'granted' && fnListenerStatus !== 'granted' && (
@@ -804,6 +828,18 @@ export default function OnboardingPage({
                                                                 className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
                                                             >
                                                                 {inputMonitoringLoading ? 'Requesting...' : 'Allow Input Monitoring'}
+                                                            </button>
+                                                        )}
+                                                        {accessibilityStatus === 'granted' && fnListenerStatus === 'denied' && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    ipcRenderer.invoke('input-monitoring:open-settings');
+                                                                }}
+                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text"
+                                                            >
+                                                                Open System Settings
                                                             </button>
                                                         )}
                                                     </div>
@@ -858,24 +894,24 @@ export default function OnboardingPage({
                                                             <>
                                                                 <button
                                                                     type="button"
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        ipcRenderer.invoke('screen:open-settings');
-                                                                    }}
-                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
-                                                                >
-                                                                    Open System Settings
-                                                                </button>
-                                                                <button
-                                                                    type="button"
                                                                     disabled={screenLoading}
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
                                                                         requestScreenAccess();
                                                                     }}
-                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text disabled:opacity-50"
+                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
                                                                 >
-                                                                    {screenLoading ? 'Checking...' : 'Check Again'}
+                                                                    {screenLoading ? 'Requesting...' : 'Request Access'}
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        ipcRenderer.invoke('screen:open-settings');
+                                                                    }}
+                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text"
+                                                                >
+                                                                    Open System Settings
                                                                 </button>
                                                             </>
                                                         ) : (
