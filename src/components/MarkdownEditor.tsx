@@ -168,6 +168,42 @@ function isHeadingRange(editor: NonNullable<ReturnType<typeof useEditor>>, range
     return editor.state.doc.nodeAt(range.from)?.type.name === 'heading';
 }
 
+function getCollapsedHeadingSectionRange(
+    editor: NonNullable<ReturnType<typeof useEditor>>,
+    range: BlockNodeRange,
+    collapsedHeadingPositions: Set<number>,
+): BlockNodeRange {
+    const heading = editor.state.doc.nodeAt(range.from);
+    if (heading?.type.name !== 'heading' || !collapsedHeadingPositions.has(range.from)) {
+        return range;
+    }
+
+    const headingLevel = typeof heading.attrs?.level === 'number' ? heading.attrs.level : 0;
+    let sectionTo = range.to;
+    let offset = 0;
+
+    for (let index = 0; index < editor.state.doc.childCount; index += 1) {
+        const child = editor.state.doc.child(index);
+        const childFrom = offset;
+        const childTo = offset + child.nodeSize;
+        offset = childTo;
+
+        if (childFrom <= range.from) continue;
+
+        if (
+            child.type.name === 'heading'
+            && typeof child.attrs?.level === 'number'
+            && child.attrs.level <= headingLevel
+        ) {
+            break;
+        }
+
+        sectionTo = childTo;
+    }
+
+    return { from: range.from, to: sectionTo };
+}
+
 function getTopLevelBlockDomAtPos(editor: NonNullable<ReturnType<typeof useEditor>>, pos: number): HTMLElement | null {
     const nodeDom = editor.view.nodeDOM(pos);
     if (nodeDom instanceof HTMLElement) return nodeDom;
@@ -1023,20 +1059,33 @@ export default function MarkdownEditor({
                 .delete(source.from, source.to)
                 .insert(mappedDropPos, slice.content)
                 .scrollIntoView();
+            const nextCollapsedPositions = new Set<number>();
+            collapsedHeadingPositions.forEach((pos) => {
+                if (pos >= source.from && pos < source.to) {
+                    nextCollapsedPositions.add(mappedDropPos + (pos - source.from));
+                    return;
+                }
+                const mappedPos = tr.mapping.map(pos, -1);
+                if (tr.doc.nodeAt(mappedPos)?.type.name === 'heading') {
+                    nextCollapsedPositions.add(mappedPos);
+                }
+            });
             view.dispatch(tr);
+            setCollapsedHeadingPositions(nextCollapsedPositions);
             window.requestAnimationFrame(() => editor.commands.focus());
         } catch (error) {
             console.warn('Unable to move editor block', error);
         }
-    }, [editor]);
+    }, [collapsedHeadingPositions, editor]);
 
     const handleBlockDragStart = useCallback((event: React.DragEvent<HTMLDivElement>) => {
         if (!editor || !blockHandle) return;
-        draggedBlockRef.current = blockHandle.range;
+        const dragRange = getCollapsedHeadingSectionRange(editor, blockHandle.range, collapsedHeadingPositions);
+        draggedBlockRef.current = dragRange;
         setDropIndicatorTop(null);
         event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData(BLOCK_DRAG_MIME, `${blockHandle.range.from}:${blockHandle.range.to}`);
-    }, [blockHandle, editor]);
+        event.dataTransfer.setData(BLOCK_DRAG_MIME, `${dragRange.from}:${dragRange.to}`);
+    }, [blockHandle, collapsedHeadingPositions, editor]);
 
     const handleBlockDragEnd = useCallback(() => {
         draggedBlockRef.current = null;
