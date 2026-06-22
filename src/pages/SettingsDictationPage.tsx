@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, Check, CheckCircle2, Languages, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { AlertCircle, Check, CheckCircle2, Languages, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react';
 import type { AuthState, SttStreamingProfile, UiSettings } from '../types';
 import { SettingsPage, SettingsSection, SettingsRow } from '../components/SettingsLayout';
 import {
@@ -81,18 +81,31 @@ export default function SettingsDictationPage({
         : 'nova3-multilingual';
     const selectedNova3Language = settings.aiEngine.sttNova3Language || 'en';
     const selectedNova3LanguageLabel = findNova3MonolingualLanguageLabel(selectedNova3Language);
+    const selectedLocalLanguageMode = settings.aiEngine.localSttLanguageMode === 'fixed' ? 'fixed' : 'auto';
+    const selectedLocalLanguage = settings.aiEngine.localSttLanguage || selectedNova3Language || 'en';
+    const selectedLocalLanguageLabel = findNova3MonolingualLanguageLabel(selectedLocalLanguage);
     const keyterms = Array.isArray(settings.aiEngine.sttKeyterms)
         ? settings.aiEngine.sttKeyterms
         : Array.isArray(settings.aiEngine.sttFluxKeyterms)
             ? settings.aiEngine.sttFluxKeyterms
             : [];
     const [isLanguagePickerOpen, setIsLanguagePickerOpen] = React.useState(false);
+    const [isLocalLanguagePickerOpen, setIsLocalLanguagePickerOpen] = React.useState(false);
+    const [localLanguageSearch, setLocalLanguageSearch] = React.useState('');
     const [isKeyTermsDrawerOpen, setIsKeyTermsDrawerOpen] = React.useState(false);
     const [isKeyTermsComposerOpen, setIsKeyTermsComposerOpen] = React.useState(false);
     const [newKeyTermDraft, setNewKeyTermDraft] = React.useState('');
     const [localSttStatus, setLocalSttStatus] = React.useState<LocalSttRuntimeStatus | null>(null);
     const [isLocalSttRefreshing, setIsLocalSttRefreshing] = React.useState(false);
     const inputClass = 'h-9 w-full rounded-md border es-global-outline bg-transparent px-3 text-sm es-general-text placeholder:text-stone-500';
+    const localLanguageSearchQuery = localLanguageSearch.trim().toLowerCase();
+    const filteredLocalLanguageOptions = React.useMemo(() => {
+        if (!localLanguageSearchQuery) return NOVA3_MONOLINGUAL_LANGUAGE_OPTIONS;
+        return NOVA3_MONOLINGUAL_LANGUAGE_OPTIONS.filter((entry) => {
+            const searchable = `${entry.label} ${entry.code}`.toLowerCase();
+            return searchable.includes(localLanguageSearchQuery);
+        });
+    }, [localLanguageSearchQuery]);
 
     const refreshLocalSttStatus = React.useCallback(async (warm = false) => {
         const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
@@ -140,6 +153,25 @@ export default function SettingsDictationPage({
         setIsLanguagePickerOpen(false);
     };
 
+    const setLocalLanguageMode = (mode: 'auto' | 'fixed') => {
+        void updateSettings({
+            aiEngine: {
+                localSttLanguageMode: mode,
+            },
+        });
+    };
+
+    const selectLocalLanguage = (code: string) => {
+        void updateSettings({
+            aiEngine: {
+                localSttLanguageMode: 'fixed',
+                localSttLanguage: code,
+            },
+        });
+        setLocalLanguageSearch('');
+        setIsLocalLanguagePickerOpen(false);
+    };
+
     React.useEffect(() => {
         if (canUseStreaming) return;
         setIsLanguagePickerOpen(false);
@@ -147,6 +179,12 @@ export default function SettingsDictationPage({
         setIsKeyTermsComposerOpen(false);
         setNewKeyTermDraft('');
     }, [canUseStreaming]);
+
+    React.useEffect(() => {
+        if (isLocalSpeechRoute) return;
+        setIsLocalLanguagePickerOpen(false);
+        setLocalLanguageSearch('');
+    }, [isLocalSpeechRoute]);
 
     React.useEffect(() => {
         if (!isLocalSpeechRoute) {
@@ -295,6 +333,66 @@ export default function SettingsDictationPage({
                     </SettingsRow>
                 ) : null}
             </SettingsSection>
+
+            {isLocalSpeechRoute ? (
+                <SettingsSection title="Recognition">
+                    <SettingsRow
+                        title="Recognition language"
+                        description="Use auto-detect for mixed languages, or fix the language for more stable short dictation clips."
+                        align="start"
+                    >
+                        <div className="min-w-[320px] space-y-3 text-right">
+                            <div className="flex justify-end">
+                                <div className="inline-flex items-center rounded-lg border es-global-outline p-0.5">
+                                    <button
+                                        type="button"
+                                        className={`h-8 rounded-md px-3 inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+                                            selectedLocalLanguageMode === 'auto'
+                                                ? 'text-white shadow-sm'
+                                                : 'es-general-item-hover es-general-text'
+                                        }`}
+                                        onClick={() => setLocalLanguageMode('auto')}
+                                        aria-label="Auto-detect local speech language"
+                                        style={selectedLocalLanguageMode === 'auto' ? { backgroundColor: '#4CAE6B' } : undefined}
+                                    >
+                                        <Languages size={13} />
+                                        <span>Auto-detect</span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`h-8 rounded-md px-3 inline-flex items-center gap-1.5 text-xs font-semibold transition-colors ${
+                                            selectedLocalLanguageMode === 'fixed'
+                                                ? 'text-white shadow-sm'
+                                                : 'es-general-item-hover es-general-text'
+                                        }`}
+                                        onClick={() => setLocalLanguageMode('fixed')}
+                                        aria-label="Use a fixed local speech language"
+                                        style={selectedLocalLanguageMode === 'fixed' ? { backgroundColor: '#4CAE6B' } : undefined}
+                                    >
+                                        <Check size={13} />
+                                        <span>Fixed</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {selectedLocalLanguageMode === 'fixed' ? (
+                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <div className="text-sm es-general-text">
+                                        {selectedLocalLanguageLabel} <span className="es-general-secondary-text">({selectedLocalLanguage})</span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className="h-9 rounded-md border es-global-outline px-3 text-sm font-medium es-general-item-hover es-general-text"
+                                        onClick={() => setIsLocalLanguagePickerOpen(true)}
+                                    >
+                                        Choose Language
+                                    </button>
+                                </div>
+                            ) : null}
+                        </div>
+                    </SettingsRow>
+                </SettingsSection>
+            ) : null}
 
             {canUseStreaming ? (
                 <SettingsSection title="Recognition">
@@ -479,6 +577,76 @@ export default function SettingsDictationPage({
                         type="button"
                         className="h-9 rounded-md border es-global-outline px-3 text-sm font-medium es-general-item-hover es-general-text"
                         onClick={() => setIsLanguagePickerOpen(false)}
+                    >
+                        Done
+                    </button>
+                </div>
+            </Modal>
+            <Modal
+                open={isLocalLanguagePickerOpen && isLocalSpeechRoute}
+                onClose={() => {
+                    setIsLocalLanguagePickerOpen(false);
+                    setLocalLanguageSearch('');
+                }}
+                title="Local Recognition Language"
+                className="max-w-3xl"
+            >
+                <div className="relative mb-3">
+                    <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+                    <input
+                        className="h-10 w-full rounded-md border es-global-outline bg-transparent pl-9 pr-9 text-sm es-general-text placeholder:text-stone-500"
+                        placeholder="Search languages..."
+                        value={localLanguageSearch}
+                        onChange={(event) => setLocalLanguageSearch(event.target.value)}
+                        autoFocus
+                    />
+                    {localLanguageSearch ? (
+                        <button
+                            type="button"
+                            className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md es-general-item-hover es-general-secondary-text"
+                            onClick={() => setLocalLanguageSearch('')}
+                            aria-label="Clear language search"
+                        >
+                            <X size={13} />
+                        </button>
+                    ) : null}
+                </div>
+                <div className="max-h-[520px] overflow-auto pr-1">
+                    {filteredLocalLanguageOptions.length ? (
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            {filteredLocalLanguageOptions.map((entry) => {
+                                const isSelected = selectedLocalLanguage === entry.code;
+                                return (
+                                    <button
+                                        key={`modal-local-language-${entry.code}`}
+                                        type="button"
+                                        className={`min-h-[54px] rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                                            isSelected
+                                                ? 'border-emerald-600 bg-emerald-600 text-white'
+                                                : 'es-global-outline es-general-background es-general-item-hover es-general-text'
+                                        }`}
+                                        onClick={() => selectLocalLanguage(entry.code)}
+                                    >
+                                        <div className="font-medium">{entry.label}</div>
+                                        <div className={`text-xs ${isSelected ? 'text-white/80' : 'es-general-secondary-text'}`}>{entry.code}</div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <div className="rounded-lg border es-global-outline px-3 py-8 text-center text-sm es-general-secondary-text">
+                            No languages match this search.
+                        </div>
+                    )}
+                </div>
+                <div className="mt-5 flex items-center justify-end gap-2">
+                    <button
+                        type="button"
+                        className="h-9 rounded-md border es-global-outline px-3 text-sm font-medium es-general-item-hover es-general-text"
+                        onClick={() => {
+                            setIsLocalLanguagePickerOpen(false);
+                            setLocalLanguageSearch('');
+                        }}
                     >
                         Done
                     </button>

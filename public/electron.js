@@ -189,13 +189,35 @@ function formatModelAliasLabel(alias) {
 
 function parseProBrandedLlmModels(rawValue, defaultAlias = '') {
   const normalizedDefaultAlias = toSlug(defaultAlias, '');
-  const fallbackAlias = normalizedDefaultAlias || 'default';
-  const fallback = [{
-    id: fallbackAlias,
-    label: formatModelAliasLabel(fallbackAlias),
-    helperText: 'Managed alias',
-    contextWindowTokens: null,
-  }];
+  const fallback = [
+    {
+      id: 'hercules',
+      label: 'Hercules',
+      helperText: 'Fast managed reasoning',
+      contextWindowTokens: null,
+    },
+    {
+      id: 'atlas',
+      label: 'Atlas',
+      helperText: 'Deeper managed reasoning',
+      contextWindowTokens: null,
+    },
+    {
+      id: 'zeus',
+      label: 'Zeus',
+      helperText: 'Maximum managed reasoning',
+      contextWindowTokens: null,
+    },
+  ];
+
+  if (normalizedDefaultAlias && !fallback.some((entry) => entry.id === normalizedDefaultAlias)) {
+    fallback.unshift({
+      id: normalizedDefaultAlias,
+      label: formatModelAliasLabel(normalizedDefaultAlias),
+      helperText: 'Managed alias',
+      contextWindowTokens: null,
+    });
+  }
 
   if (typeof rawValue !== 'string' || !rawValue.trim()) {
     return fallback;
@@ -978,6 +1000,8 @@ const DEFAULT_SETTINGS = {
     sttTranscriptionMode: 'streaming',
     sttStreamingProfile: 'nova3-multilingual',
     sttNova3Language: 'en',
+    localSttLanguageMode: 'auto',
+    localSttLanguage: 'en',
     sttKeyterms: [],
     sttFluxKeyterms: [],
     sttFluxLanguageHints: [],
@@ -1287,6 +1311,18 @@ function resolveNova3StreamingConfigForSettings(aiEngineSettings = {}) {
   };
 }
 
+function normalizeLocalSttLanguageMode(value = '') {
+  return value === 'fixed' ? 'fixed' : 'auto';
+}
+
+function resolveLocalWhisperLanguageForSettings(aiEngineSettings = {}) {
+  if (normalizeLocalSttLanguageMode(aiEngineSettings.localSttLanguageMode) !== 'fixed') {
+    return null;
+  }
+  const language = normalizeNova3LanguageCode(aiEngineSettings.localSttLanguage) || resolveDefaultNova3Language();
+  return language ? language.split('-')[0] : null;
+}
+
 function normalizeProLlmModelAlias(modelAlias = '') {
   const normalized = toSlug(modelAlias, '');
   if (normalized && PRO_BRANDED_LLM_MODEL_LOOKUP.has(normalized)) {
@@ -1308,6 +1344,8 @@ function normalizeAiEngineRoutingSettings(aiEngine = {}, mode = 'local', keyMeta
   const sttFluxLanguageHints = normalizeLegacyFluxLanguageHints(aiEngine.sttFluxLanguageHints);
   const sttStreamingProfile = normalizeSttStreamingProfile(aiEngine.sttStreamingProfile);
   const sttNova3Language = normalizeNova3LanguageCode(aiEngine.sttNova3Language) || resolveDefaultNova3Language();
+  const localSttLanguageMode = normalizeLocalSttLanguageMode(aiEngine.localSttLanguageMode);
+  const localSttLanguage = normalizeNova3LanguageCode(aiEngine.localSttLanguage) || sttNova3Language;
 
   if (normalizedMode === 'pro') {
     return {
@@ -1317,6 +1355,8 @@ function normalizeAiEngineRoutingSettings(aiEngine = {}, mode = 'local', keyMeta
       sttFluxLanguageHints,
       sttStreamingProfile,
       sttNova3Language,
+      localSttLanguageMode,
+      localSttLanguage,
       llmProvider: PRO_LLM_PROVIDER_ID,
       summaryProvider: PRO_LLM_PROVIDER_ID,
       llmModel: normalizeProLlmModelAlias(aiEngine.llmModel),
@@ -1334,6 +1374,8 @@ function normalizeAiEngineRoutingSettings(aiEngine = {}, mode = 'local', keyMeta
     sttFluxLanguageHints,
     sttStreamingProfile,
     sttNova3Language,
+    localSttLanguageMode,
+    localSttLanguage,
     llmProvider,
     summaryProvider,
     llmModel: normalizeByokLlmModel(llmProvider, aiEngine.llmModel),
@@ -1561,6 +1603,15 @@ const USER_SETTINGS_SCHEMA = {
       sttNova3Language: {
         type: 'string',
         default: DEFAULT_SETTINGS.aiEngine.sttNova3Language,
+      },
+      localSttLanguageMode: {
+        type: 'string',
+        enum: ['auto', 'fixed'],
+        default: DEFAULT_SETTINGS.aiEngine.localSttLanguageMode,
+      },
+      localSttLanguage: {
+        type: 'string',
+        default: DEFAULT_SETTINGS.aiEngine.localSttLanguage,
       },
       sttKeyterms: {
         type: 'array',
@@ -1982,6 +2033,8 @@ function mergeSettings(existing) {
   }
   merged.aiEngine.sttStreamingProfile = normalizeSttStreamingProfile(merged.aiEngine.sttStreamingProfile);
   merged.aiEngine.sttNova3Language = normalizeNova3LanguageCode(merged.aiEngine.sttNova3Language) || resolveDefaultNova3Language();
+  merged.aiEngine.localSttLanguageMode = normalizeLocalSttLanguageMode(merged.aiEngine.localSttLanguageMode);
+  merged.aiEngine.localSttLanguage = normalizeNova3LanguageCode(merged.aiEngine.localSttLanguage) || merged.aiEngine.sttNova3Language;
   merged.aiEngine.sttKeyterms = normalizeSttKeyterms(merged.aiEngine.sttKeyterms, merged.aiEngine.sttFluxKeyterms);
   merged.aiEngine.sttFluxKeyterms = normalizeSttKeyterms(merged.aiEngine.sttFluxKeyterms);
   merged.aiEngine.sttFluxLanguageHints = normalizeLegacyFluxLanguageHints(merged.aiEngine.sttFluxLanguageHints);
@@ -11286,6 +11339,11 @@ async function transcribeAudioPathWithRouting(audioPath, {
   });
   const resolvedProLanguage = resolveDeepgramBatchLanguage(proModel, proLanguage);
   const resolvedByokDeepgramLanguage = resolveDeepgramBatchLanguage(byokDeepgramModel, byokDeepgramLanguage);
+  const localWhisperLanguage = resolveLocalWhisperLanguageForSettings(settings.aiEngine || {});
+  const buildLocalTranscribePayload = () => ({
+    audio_path: audioPath,
+    ...(localWhisperLanguage ? { language: localWhisperLanguage } : {}),
+  });
   const adapter = sttRouter.getAdapterForRoute(batchPlan.route);
   const canFallBackToLocal = shouldAllowLocalSttFallback({ intent, allowLocalFallback });
   const returnTranscript = (text, route) => {
@@ -11296,13 +11354,12 @@ async function transcribeAudioPathWithRouting(audioPath, {
     provider: 'local',
     mode: 'local',
     transport: 'local',
+    language: localWhisperLanguage || 'auto',
   });
   console.log(`[stt-router][${logContext}] adapter=${batchPlan.adapter.id}, transport=${batchPlan.route.transport}, mode=${batchPlan.route.mode}, provider=${batchPlan.route.provider}`);
 
   if (batchPlan.route.mode === 'local' || batchPlan.route.provider === 'local') {
-    const localResult = await postToBackendAsync('/transcribe_file', {
-      audio_path: audioPath,
-    });
+    const localResult = await postToBackendAsync('/transcribe_file', buildLocalTranscribePayload());
     if (localResult.status !== 'success') {
       throw new Error(localResult.message || 'Local transcription failed');
     }
@@ -11334,9 +11391,7 @@ async function transcribeAudioPathWithRouting(audioPath, {
         if (!canFallBackToLocal) {
           throw proSttError;
         }
-        const localFallback = await postToBackendAsync('/transcribe_file', {
-          audio_path: audioPath,
-        });
+        const localFallback = await postToBackendAsync('/transcribe_file', buildLocalTranscribePayload());
         if (localFallback.status !== 'success') {
           throw proSttError;
         }
@@ -11362,9 +11417,7 @@ async function transcribeAudioPathWithRouting(audioPath, {
             throw retryError;
           }
           console.warn(`[stt-router][${logContext}] PRO STT retry failed, falling back to local transcribe:`, retryError.message);
-          const localFallback = await postToBackendAsync('/transcribe_file', {
-            audio_path: audioPath,
-          });
+          const localFallback = await postToBackendAsync('/transcribe_file', buildLocalTranscribePayload());
           if (localFallback.status !== 'success') {
             throw retryError;
           }
@@ -11376,9 +11429,7 @@ async function transcribeAudioPathWithRouting(audioPath, {
           throw proSttError;
         }
         console.warn(`[stt-router][${logContext}] PRO STT failed, falling back to local transcribe:`, proSttError.message);
-        const localFallback = await postToBackendAsync('/transcribe_file', {
-          audio_path: audioPath,
-        });
+        const localFallback = await postToBackendAsync('/transcribe_file', buildLocalTranscribePayload());
         if (localFallback.status !== 'success') {
           throw proSttError;
         }
@@ -14528,6 +14579,13 @@ app.whenReady().then(async () => {
       if (Object.prototype.hasOwnProperty.call(patch.aiEngine, 'sttNova3Language')) {
         const normalizedLanguage = normalizeNova3LanguageCode(patch.aiEngine.sttNova3Language);
         nextAiEngine.sttNova3Language = normalizedLanguage || nextAiEngine.sttNova3Language || resolveDefaultNova3Language();
+      }
+      if (Object.prototype.hasOwnProperty.call(patch.aiEngine, 'localSttLanguageMode')) {
+        nextAiEngine.localSttLanguageMode = normalizeLocalSttLanguageMode(patch.aiEngine.localSttLanguageMode);
+      }
+      if (Object.prototype.hasOwnProperty.call(patch.aiEngine, 'localSttLanguage')) {
+        const normalizedLanguage = normalizeNova3LanguageCode(patch.aiEngine.localSttLanguage);
+        nextAiEngine.localSttLanguage = normalizedLanguage || nextAiEngine.localSttLanguage || nextAiEngine.sttNova3Language || resolveDefaultNova3Language();
       }
       if (Object.prototype.hasOwnProperty.call(patch.aiEngine, 'sttKeyterms')) {
         nextAiEngine.sttKeyterms = normalizeSttKeyterms(patch.aiEngine.sttKeyterms);

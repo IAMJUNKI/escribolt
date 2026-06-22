@@ -309,6 +309,10 @@ body {
     background: rgba(128, 128, 128, 0.12);
 }
 
+.es-collapsed-heading-section-hidden {
+    display: none !important;
+}
+
 /* Task list checkboxes */
 .ProseMirror ul[data-type="taskList"] {
     list-style: none;

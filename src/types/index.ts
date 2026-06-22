@@ -61,6 +61,8 @@ export interface UiSettings {
         sttTranscriptionMode: SttTranscriptionMode;
         sttStreamingProfile: SttStreamingProfile;
         sttNova3Language: string;
+        localSttLanguageMode?: 'auto' | 'fixed';
+        localSttLanguage?: string;
         sttKeyterms: string[];
         sttFluxKeyterms?: string[];
         sttFluxLanguageHints?: FluxLanguageHint[];

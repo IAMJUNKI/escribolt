@@ -15,6 +15,21 @@ class TranscriberRuntimeError(RuntimeError):
     """Raised when the local MLX transcription runtime is unavailable."""
 
 
+SSL_CERT_ENV_KEYS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+FALSY_ENV_VALUES = {"0", "false", "no", "off"}
+
+LOCAL_STT_TARGET_RMS = 0.05
+LOCAL_STT_LOW_RMS_THRESHOLD = 0.025
+LOCAL_STT_MAX_GAIN = 4.0
+LOCAL_STT_TARGET_PEAK = 0.95
+LOCAL_STT_MIN_SIGNAL_PEAK = 0.01
+LOCAL_STT_TRIM_PAD_SECONDS = 0.40
+LOCAL_STT_MIN_TRIM_SECONDS = 0.05
+LOCAL_STT_MIN_RAW_EDGE_SILENCE_SECONDS = 0.75
+LOCAL_STT_TRIM_MIN_DURATION_SECONDS = 4.0
+
+
 class Transcriber:
     engine = "mlx-audio-plus"
 
@@ -33,8 +48,33 @@ class Transcriber:
         if callable(on_status):
             on_status(stage, message)
 
+    def _configure_ssl_certificates(self):
+        try:
+            import certifi
+            cert_path = certifi.where()
+        except Exception:
+            return None
+
+        if not cert_path or not os.path.exists(cert_path):
+            return None
+
+        for env_key in SSL_CERT_ENV_KEYS:
+            current_path = os.environ.get(env_key)
+            if not current_path or not os.path.exists(current_path):
+                os.environ[env_key] = cert_path
+        return cert_path
+
+    def _env_flag_enabled(self, name):
+        return os.environ.get(name, "").strip().lower() in TRUTHY_ENV_VALUES
+
+    def _env_flag_disabled(self, name):
+        return os.environ.get(name, "").strip().lower() in FALSY_ENV_VALUES
+
     def _configure_huggingface_downloads(self):
+        self._configure_ssl_certificates()
         if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") is not None:
+            return
+        if not self._env_flag_enabled("ESCRIBOLT_ENABLE_HF_TRANSFER"):
             return
         try:
             if importlib.util.find_spec("hf_transfer") is not None:
@@ -73,6 +113,9 @@ class Transcriber:
 
     def _is_whisper_model(self):
         return "whisper" in str(self.model_path or "").lower()
+
+    def _use_direct_cached_whisper_loader(self):
+        return os.environ.get("ESCRIBOLT_USE_DIRECT_WHISPER_CACHE", "0") == "1"
 
     def _install_whisper_timing_placeholder(self):
         if os.environ.get("ESCRIBOLT_OPTIMIZE_WHISPER_IMPORTS", "1") == "0":
@@ -193,7 +236,7 @@ class Transcriber:
         )
         if cached and load_path != self.model_path:
             print(f"[transcriber] resolved cached model snapshot: {load_path}")
-        if cached and isinstance(load_path, Path) and self._is_whisper_model():
+        if cached and isinstance(load_path, Path) and self._is_whisper_model() and self._use_direct_cached_whisper_loader():
             self._model = self._load_cached_whisper_model(load_path)
         else:
             self._model = load_model(load_path)
@@ -235,6 +278,122 @@ class Transcriber:
             text = getattr(result, "text", "")
         return text.strip() if isinstance(text, str) else None
 
+    def _preprocess_audio_for_whisper(self, audio_path, warmup=False):
+        if warmup or not self._env_flag_enabled("ESCRIBOLT_PREPROCESS_LOCAL_STT_AUDIO"):
+            return audio_path, None
+
+        try:
+            import numpy as np
+            import soundfile as sf
+        except Exception as error:
+            print(f"[transcriber] audio-preprocess skipped: unavailable dependencies ({error})")
+            return audio_path, None
+
+        try:
+            data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
+        except Exception as error:
+            print(f"[transcriber] audio-preprocess skipped: failed to read audio ({error})")
+            return audio_path, None
+
+        if data.size == 0 or sample_rate <= 0:
+            return audio_path, None
+
+        mono = data.mean(axis=1).astype("float32", copy=False)
+        mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
+        if mono.size == 0:
+            return audio_path, None
+
+        original_frames = int(mono.size)
+        original_duration = original_frames / float(sample_rate)
+        original_peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+        original_rms = float(np.sqrt(np.mean(mono * mono))) if mono.size else 0.0
+
+        if original_peak < LOCAL_STT_MIN_SIGNAL_PEAK or original_duration < 0.2:
+            return audio_path, None
+
+        processed = mono
+        trim_start = 0
+        trim_end = mono.size
+        frame_size = max(1, int(sample_rate * 0.03))
+        hop_size = max(1, int(sample_rate * 0.01))
+        if original_duration >= LOCAL_STT_TRIM_MIN_DURATION_SECONDS and mono.size >= frame_size:
+            frame_rms = []
+            frame_starts = []
+            for start in range(0, mono.size - frame_size + 1, hop_size):
+                frame = mono[start:start + frame_size]
+                frame_rms.append(float(np.sqrt(np.mean(frame * frame))))
+                frame_starts.append(start)
+
+            if frame_rms:
+                rms_values = np.asarray(frame_rms, dtype="float32")
+                noise_floor = float(np.percentile(rms_values, 20))
+                threshold = max(0.001, noise_floor * 1.8, original_peak * 0.008)
+                voiced_indexes = np.flatnonzero(rms_values > threshold)
+                if voiced_indexes.size > 0:
+                    pad = int(sample_rate * LOCAL_STT_TRIM_PAD_SECONDS)
+                    first_frame = int(frame_starts[int(voiced_indexes[0])])
+                    last_frame = int(frame_starts[int(voiced_indexes[-1])] + frame_size)
+                    raw_leading_silence = first_frame / float(sample_rate)
+                    raw_trailing_silence = (mono.size - last_frame) / float(sample_rate)
+                    trim_start = (
+                        max(0, first_frame - pad)
+                        if raw_leading_silence >= LOCAL_STT_MIN_RAW_EDGE_SILENCE_SECONDS
+                        else 0
+                    )
+                    trim_end = (
+                        min(mono.size, last_frame + pad)
+                        if raw_trailing_silence >= LOCAL_STT_MIN_RAW_EDGE_SILENCE_SECONDS
+                        else mono.size
+                    )
+                    trimmed_seconds = (trim_start + (mono.size - trim_end)) / float(sample_rate)
+                    if trim_end > trim_start and trimmed_seconds >= LOCAL_STT_MIN_TRIM_SECONDS:
+                        processed = mono[trim_start:trim_end]
+                    else:
+                        trim_start = 0
+                        trim_end = mono.size
+
+        processed_peak = float(np.max(np.abs(processed))) if processed.size else 0.0
+        processed_rms = float(np.sqrt(np.mean(processed * processed))) if processed.size else 0.0
+        gain = 1.0
+        if processed_peak >= LOCAL_STT_MIN_SIGNAL_PEAK and 0 < processed_rms < LOCAL_STT_LOW_RMS_THRESHOLD:
+            gain = min(
+                LOCAL_STT_MAX_GAIN,
+                LOCAL_STT_TARGET_RMS / processed_rms,
+                LOCAL_STT_TARGET_PEAK / processed_peak,
+            )
+            if gain > 1.05:
+                processed = np.clip(processed * gain, -1.0, 1.0)
+            else:
+                gain = 1.0
+
+        changed = trim_start != 0 or trim_end != mono.size or gain > 1.0
+        if not changed:
+            return audio_path, None
+
+        tmp = tempfile.NamedTemporaryFile(prefix="escribolt-local-stt-input-", suffix=".wav", delete=False)
+        processed_path = tmp.name
+        tmp.close()
+        try:
+            sf.write(processed_path, processed, sample_rate, subtype="PCM_16")
+        except Exception:
+            try:
+                os.unlink(processed_path)
+            except OSError:
+                pass
+            raise
+
+        processed_peak_after = float(np.max(np.abs(processed))) if processed.size else 0.0
+        processed_rms_after = float(np.sqrt(np.mean(processed * processed))) if processed.size else 0.0
+        print(
+            "[transcriber] audio-preprocess: "
+            f"duration={original_duration:.2f}s->{processed.size / float(sample_rate):.2f}s "
+            f"rms={original_rms:.5f}->{processed_rms_after:.5f} "
+            f"peak={original_peak:.5f}->{processed_peak_after:.5f} "
+            f"gain={gain:.2f} trim_start={trim_start / float(sample_rate):.2f}s "
+            f"trim_end={(mono.size - trim_end) / float(sample_rate):.2f}s"
+        )
+        return processed_path, processed_path
+
     def _transcribe_audio(self, audio_path, language=None, warmup=False, on_status=None):
         model = self._ensure_model(on_status=on_status)
         generate = getattr(model, "generate", None)
@@ -250,7 +409,15 @@ class Transcriber:
                 "dummy-inference",
                 "Running silent warm-up transcription to compile MLX kernels.",
             )
-        result = generate(audio_path, **kwargs)
+        transcribe_audio_path, cleanup_audio_path = self._preprocess_audio_for_whisper(audio_path, warmup=warmup)
+        try:
+            result = generate(transcribe_audio_path, **kwargs)
+        finally:
+            if cleanup_audio_path:
+                try:
+                    os.unlink(cleanup_audio_path)
+                except OSError:
+                    pass
         self._runtime_failure = None
         self._model_ready = True
         if warmup:

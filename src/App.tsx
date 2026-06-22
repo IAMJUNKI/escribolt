@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { Ear, FileText, Languages, Mic, X } from 'lucide-react';
 import ProcessingModeWidget from './ProcessingModeWidget';
-import type { SttStreamingProfile } from './types';
 import {
     findNova3MonolingualLanguageLabel,
     formatNova3LanguageBadgeCode,
@@ -68,14 +67,14 @@ function resolveMeetingPromptProvider(provider?: string) {
     };
 }
 type DictationLanguageBadgeState = {
-    profile: SttStreamingProfile;
+    mode: 'cloud-multilingual' | 'cloud-monolingual' | 'local-auto' | 'local-fixed';
     codeLabel: string;
     tooltip: string;
     visible: boolean;
 };
 
 const DEFAULT_DICTATION_LANGUAGE_BADGE: DictationLanguageBadgeState = {
-    profile: 'nova3-multilingual',
+    mode: 'cloud-multilingual',
     codeLabel: '',
     tooltip: 'Multilingual',
     visible: false,
@@ -90,6 +89,28 @@ function resolveDictationLanguageBadge(settings: any): DictationLanguageBadgeSta
     const isLocalDictation = settings?.mode === 'local' || settings?.processingModes?.dictation === 'local';
     const isStreamingDictation = !isLocalDictation
         && aiEngine.sttProvider === 'deepgram';
+
+    if (isLocalDictation) {
+        if (aiEngine.localSttLanguageMode !== 'fixed') {
+            return {
+                mode: 'local-auto',
+                codeLabel: '',
+                tooltip: 'Auto-detect',
+                visible: true,
+            };
+        }
+
+        const language = typeof aiEngine.localSttLanguage === 'string' && aiEngine.localSttLanguage.trim()
+            ? aiEngine.localSttLanguage.trim()
+            : 'en';
+
+        return {
+            mode: 'local-fixed',
+            codeLabel: formatNova3LanguageBadgeCode(language),
+            tooltip: `Fixed: ${findNova3MonolingualLanguageLabel(language)}`,
+            visible: true,
+        };
+    }
 
     if (!isStreamingDictation) {
         return DEFAULT_DICTATION_LANGUAGE_BADGE;
@@ -107,7 +128,7 @@ function resolveDictationLanguageBadge(settings: any): DictationLanguageBadgeSta
         : 'en';
 
     return {
-        profile: 'nova3-monolingual',
+        mode: 'cloud-monolingual',
         codeLabel: formatNova3LanguageBadgeCode(language),
         tooltip: `Monolingual: ${findNova3MonolingualLanguageLabel(language)}`,
         visible: true,
@@ -804,9 +825,12 @@ const App: React.FC = () => {
         ? Math.max(1000, meetingPrompt.durationMs || 4000)
         : 4000;
     const shouldShowLanguageBadge = shouldShowMainPill && widgetMode !== 'record' && languageBadge.visible;
-    const languageBadgeInlineLabel = languageBadge.profile === 'nova3-multilingual'
+    const languageBadgeInlineLabel = languageBadge.mode === 'cloud-multilingual'
         ? 'Multilingual'
-        : languageBadge.tooltip.replace(/^Monolingual:\s*/, '');
+        : languageBadge.mode === 'local-auto'
+            ? 'Auto-detect'
+            : languageBadge.tooltip.replace(/^(Monolingual|Fixed):\s*/, '');
+    const shouldShowLanguageIcon = languageBadge.mode === 'cloud-multilingual' || languageBadge.mode === 'local-auto';
 
     const recordTimerLabel = `${Math.floor(recordElapsedSeconds / 60).toString().padStart(2, '0')}:${(recordElapsedSeconds % 60).toString().padStart(2, '0')}`;
 
@@ -1051,7 +1075,7 @@ const App: React.FC = () => {
                                     }}
                                 >
                                     <span className="flex h-8 w-8 shrink-0 items-center justify-center">
-                                        {languageBadge.profile === 'nova3-multilingual' ? (
+                                        {shouldShowLanguageIcon ? (
                                             <Languages className="h-4 w-4" strokeWidth={2.4} />
                                         ) : (
                                             <span className="block w-full text-center uppercase leading-none">{languageBadge.codeLabel}</span>

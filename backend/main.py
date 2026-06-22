@@ -3,6 +3,7 @@ import base64
 import json as json_mod
 import os
 import subprocess
+import tempfile
 import time
 from collections import deque
 from contextlib import suppress
@@ -35,6 +36,29 @@ if TYPE_CHECKING:
 # Runtime tuning
 LOCAL_STT_ENGINE = "mlx-audio-plus"
 LOCAL_STT_MODEL = os.getenv("ESCRIBOLT_LOCAL_STT_MODEL", "mlx-community/whisper-large-v3-turbo-4bit")
+WHISPER_LANGUAGE_ALIASES = {
+    "zh-hans": "zh",
+    "zh-hant": "zh",
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "zh-hk": "zh",
+}
+
+
+def normalize_whisper_language_code(value: Optional[str]) -> Optional[str]:
+    normalized = str(value or "").strip().replace("_", "-").lower()
+    if not normalized or normalized == "auto":
+        return None
+    if normalized in WHISPER_LANGUAGE_ALIASES:
+        return WHISPER_LANGUAGE_ALIASES[normalized]
+    return normalized.split("-")[0] or None
+
+
+def normalize_pro_llm_provider_id(value: Optional[str]) -> str:
+    return (str(value or "").strip().lower() or "escribolt")
+
+
+PRO_LLM_PROVIDER_ID = normalize_pro_llm_provider_id(os.getenv("ESCRIBOLT_PRO_LLM_PROVIDER_ID", "escribolt"))
 MODEL_IDLE_UNLOAD_SECONDS = max(0, int(os.getenv("ESCRIBOLT_MODEL_IDLE_UNLOAD_SECONDS", "0")))
 MODEL_IDLE_SWEEP_SECONDS = max(5, int(os.getenv("ESCRIBOLT_MODEL_IDLE_SWEEP_SECONDS", "30")))
 MEMORY_LOGGING_ENABLED = os.getenv("ESCRIBOLT_MEMORY_LOGGING", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -49,7 +73,7 @@ DICTATION_PRE_TRIGGER_SECONDS = max(0.3, min(3.0, DICTATION_PRE_TRIGGER_SECONDS)
 
 # Global instances
 recorder = AudioRecorder(
-    output_filename="current_input.wav",
+    output_filename=os.path.join(tempfile.gettempdir(), "escribolt-current-input.wav"),
     silence_limit_seconds=1.0,
     pre_trigger_duration_seconds=DICTATION_PRE_TRIGGER_SECONDS,
     enable_silence_autostop=False,
@@ -718,7 +742,7 @@ class LanguageRequest(BaseModel):
 def set_language(req: LanguageRequest):
     """Set the transcription language. None/empty = auto-detect."""
     global _current_language
-    _current_language = req.language if req.language else None
+    _current_language = normalize_whisper_language_code(req.language)
     print(f"Language set to: {_current_language or 'auto-detect'}")
     return {"status": "ok", "language": _current_language or "auto"}
 
@@ -1364,7 +1388,7 @@ def stream_byok(
                         json={
                             "service": "llm",
                             "action": "transform" if tools else "stream",
-                            "provider": "escribolt",
+                            "provider": PRO_LLM_PROVIDER_ID,
                             "metadata": {
                                 "intent": "chat",
                                 "actionType": "chat",
@@ -2053,6 +2077,7 @@ def handle_tool_call(
 
 class TranscribeFileRequest(BaseModel):
     audio_path: str
+    language: Optional[str] = None
 
 
 @app.post("/transcribe_file", response_model=ActionResponse)
@@ -2066,7 +2091,10 @@ def transcribe_file(req: TranscribeFileRequest):
 
     begin_model_activity()
     try:
-        text = get_transcriber().transcribe(req.audio_path, language=_current_language)
+        text = get_transcriber().transcribe(
+            req.audio_path,
+            language=normalize_whisper_language_code(req.language) or _current_language,
+        )
     except Exception as error:
         message = local_transcription_error_message(error)
         print(f"[transcribe_file] {message}")

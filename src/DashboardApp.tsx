@@ -225,6 +225,8 @@ const DEFAULT_SETTINGS: UiSettings = {
         sttTranscriptionMode: 'streaming',
         sttStreamingProfile: 'nova3-multilingual',
         sttNova3Language: 'en',
+        localSttLanguageMode: 'auto',
+        localSttLanguage: 'en',
         sttKeyterms: [],
         sttFluxKeyterms: [],
         sttFluxLanguageHints: [],
@@ -609,6 +611,10 @@ function normalizeSttStreamingProfile(rawProfile: any): UiSettings['aiEngine']['
     return rawProfile === 'nova3-monolingual' ? 'nova3-monolingual' : 'nova3-multilingual';
 }
 
+function normalizeLocalSttLanguageMode(rawMode: any): 'auto' | 'fixed' {
+    return rawMode === 'fixed' ? 'fixed' : 'auto';
+}
+
 function normalizeNova3LanguageCode(rawCode: any): string {
     const normalized = String(rawCode || '')
         .trim()
@@ -682,6 +688,10 @@ function normalizeSettings(loaded: Partial<UiSettings> = {}): UiSettings {
             ...(loaded.aiEngine || {}),
             sttStreamingProfile: normalizeSttStreamingProfile((loaded.aiEngine as any)?.sttStreamingProfile),
             sttNova3Language: normalizeNova3LanguageCode((loaded.aiEngine as any)?.sttNova3Language) || resolveDefaultNova3Language(),
+            localSttLanguageMode: normalizeLocalSttLanguageMode((loaded.aiEngine as any)?.localSttLanguageMode),
+            localSttLanguage: normalizeNova3LanguageCode((loaded.aiEngine as any)?.localSttLanguage)
+                || normalizeNova3LanguageCode((loaded.aiEngine as any)?.sttNova3Language)
+                || resolveDefaultNova3Language(),
             sttKeyterms: normalizeSttKeyterms(
                 (loaded.aiEngine as any)?.sttKeyterms,
                 (loaded.aiEngine as any)?.sttFluxKeyterms,
@@ -1940,6 +1950,8 @@ export default function DashboardApp() {
         settings.aiEngine.sttTranscriptionMode,
         settings.aiEngine.sttStreamingProfile,
         settings.aiEngine.sttNova3Language,
+        settings.aiEngine.localSttLanguageMode,
+        settings.aiEngine.localSttLanguage,
         settings.aiEngine.llmProvider,
         settings.aiEngine.summaryProvider,
         settings.aiEngine.llmModel,
@@ -9598,12 +9610,13 @@ export default function DashboardApp() {
 			                                                <MarkdownEditor
 			                                                    key={selectedNote.id}
 			                                                    value={selectedNote.text || ''}
-	                                                    onChange={(text) => saveSelectedNote({ text })}
-	                                                    onFocus={() => ipcRenderer.send('focus-note', selectedNote.id)}
-	                                                    onBlur={() => ipcRenderer.send('blur-note', selectedNote.id)}
-	                                                    placeholder="Start writting or press '/' for commands."
-	                                                    proseClassName="max-w-none"
-	                                                />
+			                                                    collapseStateKey={`dashboard-note:${selectedNote.id}`}
+			                                                    onChange={(text) => saveSelectedNote({ text })}
+			                                                    onFocus={() => ipcRenderer.send('focus-note', selectedNote.id)}
+			                                                    onBlur={() => ipcRenderer.send('blur-note', selectedNote.id)}
+			                                                    placeholder="Start writting or press '/' for commands."
+			                                                    proseClassName="max-w-none"
+			                                                />
 	                                            </div>
 	                                        </div>
                                     </>

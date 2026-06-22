@@ -12,6 +12,7 @@ pyautogui
 keyboard
 pynput
 python-dotenv
+certifi
 scipy
 tiktoken
 soundfile
