@@ -812,6 +812,72 @@ body {
     background-color: color-mix(in srgb, var(--global-selected-outlines) 50%, transparent);
 }
 
+.es-onboarding-topbar {
+    background-color: color-mix(in srgb, var(--header-background) 86%, transparent);
+}
+
+.es-onboarding-progress-track {
+    background-color: color-mix(in srgb, var(--global-separator) 46%, transparent);
+}
+
+.es-onboarding-progress-fill {
+    background: linear-gradient(90deg, #6366f1 0%, #4CAE6B 100%);
+}
+
+.es-onboarding-card {
+    background-color: color-mix(in srgb, var(--es-surface) 86%, var(--general-background));
+}
+
+.es-onboarding-muted-surface {
+    background-color: color-mix(in srgb, var(--general-secondary-text) 8%, transparent);
+}
+
+.es-onboarding-hover:hover {
+    background-color: var(--general-onhover-item-background);
+}
+
+.es-onboarding-sidebar {
+    background-color: color-mix(in srgb, var(--sidebar-background) 78%, var(--general-background));
+}
+
+.es-onboarding-illustration-panel {
+    background:
+        radial-gradient(circle at 50% 42%, color-mix(in srgb, #4CAE6B 14%, transparent) 0%, transparent 54%),
+        var(--sidebar-background);
+}
+
+.es-onboarding-illustration-scrim {
+    background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--general-text) 5%, transparent) 100%);
+}
+
+.es-onboarding-status-success {
+    color: var(--es-success-text);
+    background-color: var(--es-success-bg);
+    border-color: var(--es-success-border);
+}
+
+.es-onboarding-status-danger {
+    color: var(--es-danger-text);
+    background-color: var(--es-danger-bg);
+    border-color: var(--es-danger-border);
+}
+
+.es-onboarding-status-warning {
+    color: color-mix(in srgb, #f59e0b 82%, var(--general-text));
+    background-color: color-mix(in srgb, #f59e0b 12%, var(--general-background));
+    border-color: color-mix(in srgb, #f59e0b 36%, var(--global-outlines));
+}
+
+.es-onboarding-status-neutral {
+    color: var(--general-secondary-text);
+    background-color: color-mix(in srgb, var(--general-secondary-text) 10%, transparent);
+    border-color: var(--global-outlines);
+}
+
+.es-onboarding-success-text {
+    color: var(--es-success-text);
+}
+
 .es-writing-text {
     color: var(--writting-general-text) !important;
 }

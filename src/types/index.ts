@@ -4,6 +4,7 @@
 
 export type AppMode = 'local' | 'byok' | 'pro';
 export type ThemeId = 'black' | 'white';
+export type ThemePreference = ThemeId | 'system';
 export type SttProvider = 'deepgram' | 'openai' | 'groq';
 export type LlmProvider = 'openai' | 'groq' | 'anthropic' | 'gemini' | 'escribolt';
 export type LlmSummaryProvider = LlmProvider;
@@ -43,7 +44,8 @@ export interface ApiKeyMetadata {
 
 export interface UiSettings {
     mode: AppMode;
-    theme: ThemeId;
+    theme: ThemePreference;
+    effectiveTheme?: ThemeId;
     onboardingCompleted: boolean;
     productTourVersionSeen: number;
     launchAtLogin: boolean;

@@ -12,6 +12,7 @@ const {
   session,
   desktopCapturer,
   systemPreferences,
+  nativeTheme,
   Notification,
 } = require('electron');
 const { execFile, execSync, spawn } = require('child_process');
@@ -48,6 +49,18 @@ const {
   shouldAllowLocalSttFallback,
 } = require('./sttFallbackPolicy');
 const isDev = !app.isPackaged;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.exit(0);
+} else {
+  app.on('second-instance', (_event, argv = []) => {
+    const deepLink = findDeepLinkInArgv(argv);
+    if (deepLink && handleAuthDeepLink(deepLink)) {
+      return;
+    }
+    revealDashboardWindow({ focus: true });
+  });
+}
 
 let ffmpeg = null;
 let ffmpegBinaryPath = null;
@@ -296,6 +309,7 @@ const DICTATION_LIFECYCLE_STATES = {
 const DICTATION_LIFECYCLE_STATE_SET = new Set(Object.values(DICTATION_LIFECYCLE_STATES));
 const DICTATION_CAPTURED_FALLBACK_TIMEOUT_MS = 120000;
 const DICTATION_TRANSCRIPTION_FAILURE_MESSAGE = 'Something went wrong while transcribing. Please try again.';
+const DICTATION_REPETITIVE_TRANSCRIPT_MESSAGE = 'Transcription looked like repeated speech, so nothing was pasted.';
 let dictationLifecycleState = DICTATION_LIFECYCLE_STATES.IDLE;
 let activeSessionId = null;
 let speculativeStreamingSession = null;
@@ -561,13 +575,14 @@ function installDownloadedUpdate() {
   if (!isUpdaterSupported() || updateState.status !== 'downloaded') {
     return getUpdateStateSnapshot();
   }
+  autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.quitAndInstall(false, true);
   return getUpdateStateSnapshot();
 }
 
 function initializeAutoUpdates() {
   if (updatesInitialized) {
-    return;
+    return true;
   }
   updatesInitialized = true;
 
@@ -582,6 +597,7 @@ function initializeAutoUpdates() {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.allowPrerelease = false;
 
   autoUpdater.on('checking-for-update', () => {
@@ -982,7 +998,7 @@ const DEFAULT_SYNC_INTERVAL_MS = 300000;
 const DEFAULT_SETTINGS = {
   mode: 'local',
   model: 'qwen',
-  theme: 'black',
+  theme: 'system',
   onboardingCompleted: false,
   productTourVersionSeen: 0,
   launchAtLogin: false,
@@ -1526,7 +1542,7 @@ const USER_SETTINGS_SCHEMA = {
   },
   theme: {
     type: 'string',
-    enum: ['black', 'white'],
+    enum: ['system', 'black', 'white'],
     default: DEFAULT_SETTINGS.theme,
   },
   onboardingCompleted: {
@@ -1967,9 +1983,7 @@ function mergeSettings(existing) {
   if (!['qwen', 'gemma'].includes(merged.model)) {
     merged.model = DEFAULT_SETTINGS.model;
   }
-  if (!['black', 'white'].includes(merged.theme)) {
-    merged.theme = DEFAULT_SETTINGS.theme;
-  }
+  merged.theme = normalizeThemePreference(merged.theme);
   if (typeof merged.onboardingCompleted !== 'boolean') {
     merged.onboardingCompleted = DEFAULT_SETTINGS.onboardingCompleted;
   }
@@ -2317,7 +2331,7 @@ function syncSettingsState() {
   persistSidebarPinnedItems(settings.layout && settings.layout.pinnedSidebarItems ? settings.layout.pinnedSidebarItems : []);
   userSettingsStore.set(settings);
   selectedModel = settings.model;
-  selectedTheme = settings.theme;
+  selectedTheme = resolveEffectiveTheme(settings.theme);
 }
 
 function isSafeStorageUsable() {
@@ -5546,7 +5560,24 @@ let settings = loadUserSettings();
 settings.shortcuts = normalizeShortcutSettings(settings.shortcuts);
 shortcutsLastWorking = { ...settings.shortcuts };
 let selectedModel = settings.model;
-let selectedTheme = settings.theme;
+let selectedTheme = resolveEffectiveTheme(settings.theme);
+if (nativeTheme && typeof nativeTheme.on === 'function') {
+  nativeTheme.on('updated', () => {
+    const nextTheme = resolveEffectiveTheme(settings.theme);
+    selectedTheme = nextTheme;
+    if (settings.theme !== 'system') {
+      return;
+    }
+    const latestUiSettings = getUiSettings();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('set-theme', nextTheme);
+      mainWindow.webContents.send('ui-settings-updated', latestUiSettings);
+    }
+    if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+      dashboardWindow.webContents.send('ui-settings-updated', latestUiSettings);
+    }
+  });
+}
 if (settings.mode === 'pro') {
   settings.aiEngine.sttProvider = 'deepgram';
   settings.aiEngine.llmProvider = PRO_LLM_PROVIDER_ID;
@@ -7268,9 +7299,22 @@ const MODELS = [
 
 // --- Themes ---
 const THEMES = [
-  { label: 'Black (Default)', id: 'black' },
+  { label: 'System', id: 'system' },
+  { label: 'Black (Dark)', id: 'black' },
   { label: 'White (Light)', id: 'white' },
 ];
+
+function normalizeThemePreference(theme) {
+  return ['system', 'black', 'white'].includes(theme) ? theme : DEFAULT_SETTINGS.theme;
+}
+
+function resolveEffectiveTheme(themePreference) {
+  const normalizedTheme = normalizeThemePreference(themePreference);
+  if (normalizedTheme === 'black' || normalizedTheme === 'white') {
+    return normalizedTheme;
+  }
+  return nativeTheme && nativeTheme.shouldUseDarkColors ? 'black' : 'white';
+}
 
 // --- Sticky Note Window Management ---
 function getStickyNoteIdForWindow(win) {
@@ -7747,6 +7791,9 @@ function createDashboardWindow(options = {}) {
       if (process.platform === 'darwin' && app.dock) {
         app.dock.show();
       }
+      if (dashboardWindow.isMinimized()) {
+        dashboardWindow.restore();
+      }
       dashboardWindow.show();
       if (focusWindow) {
         dashboardWindow.focus();
@@ -7844,6 +7891,24 @@ function createDashboardWindow(options = {}) {
       app.dock.hide();
     }
   });
+}
+
+function revealDashboardWindow(options = {}) {
+  const focusWindow = options.focus !== false;
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.show();
+  }
+  createDashboardWindow({ show: true, focus: focusWindow });
+  if (!dashboardWindow || dashboardWindow.isDestroyed()) {
+    return;
+  }
+  if (dashboardWindow.isMinimized()) {
+    dashboardWindow.restore();
+  }
+  dashboardWindow.show();
+  if (focusWindow) {
+    dashboardWindow.focus();
+  }
 }
 
 function normalizeDashboardNavigationDestination(destination = {}) {
@@ -9208,6 +9273,9 @@ function isCurrentSttRouteLocal() {
 }
 
 function getLocalSttUnavailableMessage(status = localSttRuntimeStatus) {
+  if (!status || status.status === 'unknown' || status.status === 'idle') {
+    return LOCAL_STT_PREPARING_MESSAGE;
+  }
   if (status && status.warming) {
     return status.message || LOCAL_STT_PREPARING_MESSAGE;
   }
@@ -9218,6 +9286,13 @@ function getLocalSttUnavailableMessage(status = localSttRuntimeStatus) {
     return status.message;
   }
   return 'Local speech is not ready yet. Keep Escribolt open while it finishes preparing.';
+}
+
+function shouldBlockVoiceActionForLocalSttStatus(status = localSttRuntimeStatus) {
+  if (!status || status.available === true || status.status === 'ready') {
+    return false;
+  }
+  return status.warming === true || status.status === 'warming' || status.status === 'error';
 }
 
 function shouldStartLocalSttWarmupForStatus(status = localSttRuntimeStatus) {
@@ -9535,12 +9610,147 @@ function postToBackendVoid(urlPath, body) {
   postToBackend(urlPath, body, null);
 }
 
+function tokenizeTranscriptWords(text = '') {
+  const tokens = [];
+  const pattern = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu;
+  let match;
+  while ((match = pattern.exec(String(text || ''))) !== null) {
+    tokens.push({
+      value: String(match[0] || '').toLocaleLowerCase(),
+      index: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+  return tokens;
+}
+
+function transcriptUnitsMatch(tokens, firstStart, secondStart, unitSize) {
+  for (let offset = 0; offset < unitSize; offset += 1) {
+    if (tokens[firstStart + offset]?.value !== tokens[secondStart + offset]?.value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findRepeatedTranscriptTail(tokens = []) {
+  const tokenCount = tokens.length;
+  let best = null;
+  const maxUnitSize = Math.min(6, Math.floor(tokenCount / 2));
+
+  for (let unitSize = 1; unitSize <= maxUnitSize; unitSize += 1) {
+    const tailStart = tokenCount - unitSize;
+    let repeatedUnits = 1;
+    let cursor = tailStart - unitSize;
+    while (cursor >= 0 && transcriptUnitsMatch(tokens, cursor, tailStart, unitSize)) {
+      repeatedUnits += 1;
+      cursor -= unitSize;
+    }
+
+    const repeatedTokens = repeatedUnits * unitSize;
+    const minRepeatedUnits = unitSize === 1 ? 8 : 4;
+    const minRepeatedTokens = Math.max(10, unitSize * minRepeatedUnits);
+    if (repeatedUnits < minRepeatedUnits || repeatedTokens < minRepeatedTokens) {
+      continue;
+    }
+
+    const startTokenIndex = tokenCount - repeatedTokens;
+    const candidate = {
+      startTokenIndex,
+      repeatedTokens,
+      repeatedUnits,
+      unitSize,
+      cutIndex: tokens[startTokenIndex].index,
+    };
+    if (!best
+      || candidate.startTokenIndex < best.startTokenIndex
+      || (candidate.startTokenIndex === best.startTokenIndex && candidate.unitSize < best.unitSize)) {
+      best = candidate;
+    }
+  }
+
+  return best;
+}
+
+function getTranscriptRepetitionStats(tokens = []) {
+  const counts = new Map();
+  tokens.forEach((token) => {
+    counts.set(token.value, (counts.get(token.value) || 0) + 1);
+  });
+  let maxCount = 0;
+  counts.forEach((count) => {
+    maxCount = Math.max(maxCount, count);
+  });
+  return {
+    uniqueTokens: counts.size,
+    maxTokenCount: maxCount,
+    maxTokenRatio: tokens.length ? maxCount / tokens.length : 0,
+  };
+}
+
+function sanitizeVoiceActionTranscript(text, { context = 'dictation' } = {}) {
+  const originalText = String(text || '').trim();
+  if (!originalText) {
+    return {
+      text: '',
+      blocked: true,
+      changed: false,
+      message: 'Transcription is empty.',
+    };
+  }
+
+  const tokens = tokenizeTranscriptWords(originalText);
+  const repeatedTail = findRepeatedTranscriptTail(tokens);
+  let sanitizedText = originalText;
+  let removedTokens = 0;
+
+  if (repeatedTail) {
+    sanitizedText = originalText.slice(0, repeatedTail.cutIndex).trim();
+    removedTokens = repeatedTail.repeatedTokens;
+  }
+
+  const sanitizedTokens = tokenizeTranscriptWords(sanitizedText);
+  const originalStats = getTranscriptRepetitionStats(tokens);
+  const removedTokenRatio = tokens.length ? removedTokens / tokens.length : 0;
+  const looksGloballyRepetitive = tokens.length >= 24
+    && originalStats.maxTokenRatio >= 0.65
+    && originalStats.uniqueTokens <= Math.max(3, Math.ceil(tokens.length * 0.15));
+
+  if (!sanitizedText || (repeatedTail && removedTokenRatio >= 0.65 && sanitizedTokens.length < 3) || (!repeatedTail && looksGloballyRepetitive)) {
+    console.warn(`[dictation][sanitize] blocked repetitive transcript context=${context} tokens=${tokens.length} removed=${removedTokens} max_token_ratio=${originalStats.maxTokenRatio.toFixed(2)}`);
+    return {
+      text: '',
+      blocked: true,
+      changed: repeatedTail !== null,
+      message: DICTATION_REPETITIVE_TRANSCRIPT_MESSAGE,
+    };
+  }
+
+  if (repeatedTail) {
+    console.warn(`[dictation][sanitize] stripped repetitive transcript tail context=${context} tokens=${tokens.length} removed=${removedTokens} unit=${repeatedTail.unitSize} repeats=${repeatedTail.repeatedUnits}`);
+    return {
+      text: sanitizedText,
+      blocked: false,
+      changed: true,
+      message: '',
+    };
+  }
+
+  return {
+    text: originalText,
+    blocked: false,
+    changed: false,
+    message: '',
+  };
+}
+
 async function pasteDictationTranscript(text, { remember = true } = {}) {
-  const cleanText = String(text || '').trim();
+  const sanitized = sanitizeVoiceActionTranscript(text, { context: 'paste' });
+  const cleanText = sanitized.text;
   if (!cleanText) {
     return {
       status: 'error',
-      message: 'Transcription is empty.',
+      message: sanitized.message || 'Transcription is empty.',
     };
   }
   if (remember) {
@@ -9626,6 +9836,7 @@ function getUiSettings() {
   return {
     mode: settings.mode,
     theme: settings.theme,
+    effectiveTheme: resolveEffectiveTheme(settings.theme),
     onboardingCompleted: settings.onboardingCompleted,
     productTourVersionSeen: Number.isFinite(Number(settings.productTourVersionSeen))
       ? Math.max(0, Math.floor(Number(settings.productTourVersionSeen)))
@@ -10719,7 +10930,7 @@ function buildTrayMenu() {
       ],
     },
     { type: 'separator' },
-    { label: 'Open Escribolt', click: createDashboardWindow },
+    { label: 'Open Escribolt', click: () => revealDashboardWindow({ focus: true }) },
     { type: 'separator' },
     { label: 'Quit Escribolt', click: () => app.quit() },
   ]);
@@ -10734,7 +10945,14 @@ function createTray() {
 }
 
 function handleQuickNoteCompletion(transcribedText) {
-  if (!transcribedText) return;
+  const sanitized = sanitizeVoiceActionTranscript(transcribedText, { context: 'quick-note' });
+  if (!sanitized.text) {
+    if (sanitized.message) {
+      showMainWidgetErrorBanner(sanitized.message, { dismissPill: false });
+    }
+    return false;
+  }
+  transcribedText = sanitized.text;
   const shouldShowQuickNotePopup = settings && settings.quickNotePopupEnabled !== false;
 
   const activeNote = activeNoteId
@@ -10779,6 +10997,7 @@ function handleQuickNoteCompletion(transcribedText) {
   } else {
     showQuickNoteCreatedNotification(newNote);
   }
+  return true;
 }
 
 function normalizeVoiceActionStatusMode(actionMode = '') {
@@ -12252,8 +12471,10 @@ function startVoiceAction(actionMode = 'transcription', options = {}) {
     if (localSttRuntimeStatus.status !== 'error') {
       warmLocalSttRuntimeIfNeeded('dictation-start');
     }
-    showMainWidgetErrorBanner(getLocalSttUnavailableMessage(localSttRuntimeStatus), { dismissPill: false });
-    return false;
+    if (shouldBlockVoiceActionForLocalSttStatus(localSttRuntimeStatus)) {
+      showMainWidgetErrorBanner(getLocalSttUnavailableMessage(localSttRuntimeStatus), { dismissPill: false });
+      return false;
+    }
   }
   activeVoiceActionMode = normalizedActionMode;
   const captureArmPromise = armDictationCapture();
@@ -13942,17 +14163,22 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('byok:get-secure-storage-status', () => {
     const byokState = readByokSecretState();
-    if (byokState.secureStoragePrimed && !(byokSecretStore.get('secureStoragePrimed') === true)) {
+    const encryptedAuthJwt = String(authStore.get('encryptedJwt') || '').trim();
+    const encryptedAuthRefreshToken = String(authStore.get('encryptedRefreshToken') || '').trim();
+    const authStoragePrimed = !!(encryptedAuthJwt || encryptedAuthRefreshToken);
+    const secureStoragePrimed = byokState.secureStoragePrimed === true || authStoragePrimed;
+    const secureStoragePrimedAt = Number(byokState.secureStoragePrimedAt || 0) || (secureStoragePrimed ? Date.now() : 0);
+    if (secureStoragePrimed && !(byokSecretStore.get('secureStoragePrimed') === true)) {
       writeByokSecretState({
         ...byokState,
         secureStoragePrimed: true,
-        secureStoragePrimedAt: byokState.secureStoragePrimedAt || Date.now(),
+        secureStoragePrimedAt,
       });
     }
     return {
       status: 'success',
-      secureStoragePrimed: byokState.secureStoragePrimed === true,
-      secureStoragePrimedAt: Number(byokState.secureStoragePrimedAt || 0),
+      secureStoragePrimed,
+      secureStoragePrimedAt,
       secureStorageAvailable: getSafeStorageAvailabilityHint(),
     };
   });
@@ -14393,10 +14619,10 @@ app.whenReady().then(async () => {
       }
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'theme') && THEMES.some((theme) => theme.id === patch.theme)) {
-      selectedTheme = patch.theme;
       settings.theme = patch.theme;
+      selectedTheme = resolveEffectiveTheme(settings.theme);
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('set-theme', patch.theme);
+        mainWindow.webContents.send('set-theme', selectedTheme);
       }
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'launchAtLogin')) {
@@ -15257,6 +15483,10 @@ app.on('will-quit', () => {
   stopFnKeyHelper();
   resetFnShortcutState();
   globalShortcut.unregisterAll();
+});
+
+app.on('activate', () => {
+  revealDashboardWindow({ focus: true });
 });
 
 app.on('window-all-closed', () => {

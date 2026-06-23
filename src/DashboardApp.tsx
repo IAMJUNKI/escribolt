@@ -46,7 +46,7 @@ import type {
     RecordModeStatus, RecordModeCaptureEngine,
     RecordingNoticeLevel, UiSettings, AuthState,
     RecordingItem, RecordingNotice, SyncConflict, Note, NotesData, Folder, SidebarPinnedItem, ShortcutSettings, ChatSession,
-    StickyNoteDefaultPlacement, StickyNoteColorId,
+    StickyNoteDefaultPlacement, StickyNoteColorId, ThemeId,
 } from './types';
 
 const colorPalette: Record<string, { color: string; bg: string }> = {
@@ -192,6 +192,35 @@ const DEFAULT_SHORTCUTS: ShortcutSettings = {
 const STICKY_NOTE_DEFAULT_PLACEMENTS: StickyNoteDefaultPlacement[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
 const STICKY_NOTE_COLOR_IDS: StickyNoteColorId[] = ['yellow', 'blue', 'green', 'pink'];
 const CURRENT_PRODUCT_TOUR_VERSION = 1;
+const THEME_PREFERENCES: UiSettings['theme'][] = ['system', 'black', 'white'];
+
+function resolveSystemTheme(): ThemeId {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+        return 'black';
+    }
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'white' : 'black';
+}
+
+function normalizeThemePreference(rawTheme: unknown): UiSettings['theme'] {
+    return THEME_PREFERENCES.includes(rawTheme as UiSettings['theme'])
+        ? rawTheme as UiSettings['theme']
+        : DEFAULT_SETTINGS.theme;
+}
+
+function normalizeEffectiveTheme(rawTheme: unknown, themePreference: UiSettings['theme']): ThemeId {
+    if (rawTheme === 'black' || rawTheme === 'white') {
+        return rawTheme;
+    }
+    if (themePreference === 'black' || themePreference === 'white') {
+        return themePreference;
+    }
+    return resolveSystemTheme();
+}
+
+function resolveEffectiveTheme(settings: Partial<UiSettings>): ThemeId {
+    const themePreference = normalizeThemePreference(settings.theme);
+    return normalizeEffectiveTheme(settings.effectiveTheme, themePreference);
+}
 
 function normalizeStickyNoteDefaultPlacement(value: unknown): StickyNoteDefaultPlacement {
     return STICKY_NOTE_DEFAULT_PLACEMENTS.includes(value as StickyNoteDefaultPlacement)
@@ -207,7 +236,8 @@ function normalizeStickyNoteColorId(value: unknown): StickyNoteColorId {
 
 const DEFAULT_SETTINGS: UiSettings = {
     mode: 'local',
-    theme: 'black',
+    theme: 'system',
+    effectiveTheme: resolveSystemTheme(),
     onboardingCompleted: false,
     productTourVersionSeen: 0,
     launchAtLogin: false,
@@ -647,6 +677,7 @@ function normalizeProcessingModes(rawModes: any, fallbackLocation: 'local' | 'cl
 }
 
 function normalizeSettings(loaded: Partial<UiSettings> = {}): UiSettings {
+    const themePreference = normalizeThemePreference((loaded as any).theme);
     const rawApiKeys: any = (loaded.aiEngine as any)?.apiKeys || {};
     const normalizedApiKeys = {
         deepgram: {
@@ -674,6 +705,8 @@ function normalizeSettings(loaded: Partial<UiSettings> = {}): UiSettings {
     return {
         ...DEFAULT_SETTINGS,
         ...loaded,
+        theme: themePreference,
+        effectiveTheme: normalizeEffectiveTheme((loaded as any).effectiveTheme, themePreference),
         productTourVersionSeen: normalizeProductTourVersionSeen(loaded),
         quickNotePopupEnabled: typeof loaded.quickNotePopupEnabled === 'boolean'
             ? !!loaded.quickNotePopupEnabled
@@ -1228,6 +1261,7 @@ export default function DashboardApp() {
     const [draggingNoteId, setDraggingNoteId] = useState<string | null>(null);
     const [noteFolderDropTargetId, setNoteFolderDropTargetId] = useState<string | null>(null);
     const [noteRowDropTargetId, setNoteRowDropTargetId] = useState<string | null>(null);
+    const effectiveTheme = resolveEffectiveTheme(settings);
     const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(() => {
         try {
             const stored = localStorage.getItem('escribolt_sidebar_expanded_folders');
@@ -6633,7 +6667,7 @@ export default function DashboardApp() {
 
 	    if (!isLoading && !settings.onboardingCompleted) {
         return (
-            <div className={`h-screen es-dashboard es-general-text overflow-hidden es-theme-${settings.theme} es-general-background`}>
+            <div className={`h-screen es-dashboard es-general-text overflow-hidden es-theme-${effectiveTheme} es-general-background`}>
                 <div style={{ height: '100vh' }}>
                     <OnboardingPage
                         settings={settings}
@@ -7043,7 +7077,7 @@ export default function DashboardApp() {
     };
 
     return (
-        <div className={`h-screen es-dashboard es-general-text overflow-hidden es-theme-${settings.theme} es-general-background`}>
+        <div className={`h-screen es-dashboard es-general-text overflow-hidden es-theme-${effectiveTheme} es-general-background`}>
             <div className="flex h-full">
                 <aside
                     data-tour-id="workspace-library"
@@ -10255,7 +10289,7 @@ export default function DashboardApp() {
             <ProductTour
                 isOpen={isProductTourOpen}
                 steps={productTourSteps}
-                theme={settings.theme}
+                theme={effectiveTheme}
                 onStepEnter={handleProductTourStepEnter}
                 onClose={closeProductTour}
             />

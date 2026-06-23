@@ -179,9 +179,9 @@ export default function OnboardingTutorial({
     const localSpeechPreparing = localSpeech?.isLocalRoute === true
         && localSpeech.available !== true
         && localSpeech.status !== 'error';
-    const localSpeechIdleLabel = localSpeech?.isLocalRoute === true
-        ? formatLocalSpeechPromptLabel(localSpeech)
-        : undefined;
+    const localSpeechIdleLabel = localSpeech
+        ? (localSpeech.isLocalRoute === true ? formatLocalSpeechPromptLabel(localSpeech) : undefined)
+        : 'Checking model';
 
     const markComplete = useCallback((stepId: TutorialStepId) => {
         setCompletion((previous) => previous[stepId] ? previous : { ...previous, [stepId]: true });
@@ -281,8 +281,9 @@ export default function OnboardingTutorial({
 
     useEffect(() => {
         if (activeStep !== 'dictation') return;
+        void refreshShortcutsRuntime({ refreshLocalSpeech: true });
         window.setTimeout(() => dictationInputRef.current?.focus(), 120);
-    }, [activeStep]);
+    }, [activeStep, refreshShortcutsRuntime]);
 
     useEffect(() => {
         if (activeStep === 'dictation' && dictationText.trim().length >= 8) {
@@ -559,9 +560,9 @@ export default function OnboardingTutorial({
                             Speak normally and confirm when the bars respond.
                         </p>
                     </div>
-                    <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-5 shadow-sm space-y-4">
+                    <div className="rounded-xl border es-global-outline es-onboarding-card p-5 shadow-sm space-y-4">
                         <div className="text-sm font-extrabold es-general-text">Do you see green bars while you speak?</div>
-                        <div className="h-28 rounded-xl bg-stone-500/5 flex items-center justify-center gap-3 px-6">
+                        <div className="h-28 rounded-xl es-onboarding-muted-surface flex items-center justify-center gap-3 px-6">
                             {micBars.map((level, index) => (
                                 <div
                                     key={`meter-bar-${index}`}
@@ -576,7 +577,7 @@ export default function OnboardingTutorial({
                             ))}
                         </div>
                         {micMeterError ? (
-                            <div className="rounded-lg border border-rose-500/20 bg-rose-500/5 p-3 text-[11px] text-rose-400">
+                            <div className="rounded-lg border es-onboarding-status-danger p-3 text-[11px]">
                                 {micMeterError}
                             </div>
                         ) : null}
@@ -597,14 +598,14 @@ export default function OnboardingTutorial({
                                 <button
                                     type="button"
                                     onClick={() => setMicRetryKey((value) => value + 1)}
-                                    className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-3 py-2 text-xs font-bold es-general-text hover:bg-stone-500/5"
+                                    className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-3 py-2 text-xs font-bold es-general-text es-onboarding-hover"
                                 >
                                     <RefreshCw size={13} /> Retry
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => ipcRenderer.invoke('microphone:open-settings')}
-                                    className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-3 py-2 text-xs font-bold es-general-text hover:bg-stone-500/5"
+                                    className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-3 py-2 text-xs font-bold es-general-text es-onboarding-hover"
                                 >
                                     <Settings size={13} /> Settings
                                 </button>
@@ -631,7 +632,7 @@ export default function OnboardingTutorial({
                         value={dictationText}
                         onChange={(event) => setDictationText(event.target.value)}
                         placeholder="Dictate a sentence here..."
-                        className="h-44 w-full resize-none rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4 text-sm es-general-text outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
+                        className="h-44 w-full resize-none rounded-xl border es-global-outline es-onboarding-card p-4 text-sm es-general-text outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
                     />
                     {completion.dictation ? <SuccessBanner text="Dictation landed in the practice field." /> : null}
                 </div>
@@ -655,7 +656,7 @@ export default function OnboardingTutorial({
                         }}
                     />
                     <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                        <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4">
+                        <div className="rounded-xl border es-global-outline es-onboarding-card p-4">
                             <div className="text-[10px] font-bold uppercase tracking-[0.16em] es-general-secondary-text">Sample audio</div>
                             <p className="mt-2 text-sm leading-relaxed es-general-text">
                                 Play the built-in audio sample while recording is active.
@@ -674,7 +675,7 @@ export default function OnboardingTutorial({
                                 type="button"
                                 disabled={samplePlaybackState !== 'playing'}
                                 onClick={stopSampleConversation}
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text hover:bg-stone-500/5 disabled:opacity-45"
+                                className="inline-flex items-center justify-center gap-1.5 rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text es-onboarding-hover disabled:opacity-45"
                             >
                                 <Square size={13} /> Stop
                             </button>
@@ -690,17 +691,17 @@ export default function OnboardingTutorial({
                             </div>
                             <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase ${
                                 recordModeStatus === 'capturing'
-                                    ? 'bg-rose-500/10 text-rose-400'
+                                    ? 'es-onboarding-status-danger'
                                     : recordModeStatus === 'processing'
-                                        ? 'bg-emerald-500/10 text-emerald-500'
-                                        : 'bg-stone-500/10 es-general-secondary-text'
+                                        ? 'es-onboarding-status-success'
+                                        : 'es-onboarding-status-neutral'
                             }`}>
                                 {recordModeStatus}
                             </span>
                         </div>
                     </div>
                     {samplePlaybackError ? (
-                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-[11px] text-amber-500">
+                        <div className="rounded-lg border es-onboarding-status-warning p-3 text-[11px]">
                             {samplePlaybackError}
                         </div>
                     ) : null}
@@ -719,7 +720,7 @@ export default function OnboardingTutorial({
                 <div className="space-y-5">
                     <TutorialHeader icon={Sparkles} title="Generate a summary" body="Turn the saved sample transcript into a concise meeting summary." />
                     {!tutorialRecording ? (
-                        <div className="rounded-xl border es-global-outline bg-stone-500/5 p-4 text-sm es-general-secondary-text">
+                        <div className="rounded-xl border es-global-outline es-onboarding-muted-surface p-4 text-sm es-general-secondary-text">
                             Record a sample first, or skip this step.
                         </div>
                     ) : (
@@ -737,7 +738,7 @@ export default function OnboardingTutorial({
                                 <Sparkles size={14} /> {isGeneratingSummary ? 'Generating...' : 'Generate summary'}
                             </button>
                             {summaryError ? (
-                                <div className="rounded-lg border border-rose-500/20 bg-rose-500/5 p-3 text-[11px] text-rose-400">
+                                <div className="rounded-lg border es-onboarding-status-danger p-3 text-[11px]">
                                     {summaryError}
                                 </div>
                             ) : null}
@@ -756,7 +757,7 @@ export default function OnboardingTutorial({
                     label={shortcutLabels.quickNote}
                     state={isQuickNoteBusy ? voiceStatus.state : undefined}
                 />
-                <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4">
+                <div className="rounded-xl border es-global-outline es-onboarding-card p-4">
                     <div className="text-[10px] font-bold uppercase tracking-[0.16em] es-general-secondary-text">Prompt</div>
                     <p className="mt-2 text-sm es-general-text">
                         Say one short note, then press the shortcut again to finish.
@@ -794,7 +795,7 @@ export default function OnboardingTutorial({
 
     return (
         <div className="flex-1 flex overflow-hidden">
-            <aside className="w-[270px] shrink-0 border-r es-global-separator p-6 bg-stone-500/[0.03]">
+            <aside className="w-[270px] shrink-0 border-r es-global-separator p-6 es-onboarding-sidebar">
                 <div className="mb-6">
                     <div className="text-[10px] font-black uppercase tracking-[0.2em] es-general-secondary-text">Tutorial</div>
                     <div className="mt-1 text-lg font-extrabold es-general-text">Practice the commands</div>
@@ -811,14 +812,14 @@ export default function OnboardingTutorial({
                                 className={`w-full rounded-xl border p-3 text-left transition-all ${
                                     active
                                         ? 'border-emerald-500 bg-emerald-500/5 shadow-sm'
-                                        : 'es-global-outline hover:bg-stone-500/5'
+                                        : 'es-global-outline es-onboarding-hover'
                                 }`}
                             >
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="text-[10px] font-black uppercase tracking-[0.16em] es-general-secondary-text">
                                         {index + 1}. {step.kicker}
                                     </span>
-                                    {done ? <Check size={14} className="text-emerald-500" strokeWidth={3} /> : null}
+                                    {done ? <Check size={14} className="es-onboarding-success-text" strokeWidth={3} /> : null}
                                 </div>
                                 <div className="mt-1 text-xs font-bold es-general-text">{step.label}</div>
                             </button>
@@ -832,12 +833,12 @@ export default function OnboardingTutorial({
                     <div className="flex-1">
                         <div className="mb-8 flex items-center justify-between gap-4">
                             <div>
-                                <div className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-500">
+                                <div className="text-[10px] font-black uppercase tracking-[0.2em] es-onboarding-success-text">
                                     Step {activeIndex + 1} of {TUTORIAL_STEPS.length}
                                 </div>
                                 <div className="mt-1 text-sm es-general-secondary-text">{activeStepMeta.label}</div>
                             </div>
-                            <div className="h-2 w-36 overflow-hidden rounded-full bg-stone-500/10">
+                            <div className="h-2 w-36 overflow-hidden rounded-full es-onboarding-progress-track">
                                 <div
                                     className="h-full rounded-full bg-emerald-500 transition-all"
                                     style={{ width: `${((activeIndex + 1) / TUTORIAL_STEPS.length) * 100}%` }}
@@ -851,7 +852,7 @@ export default function OnboardingTutorial({
                         <button
                             type="button"
                             onClick={goBack}
-                            className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text hover:bg-stone-500/5"
+                            className="inline-flex items-center gap-1.5 rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text es-onboarding-hover"
                         >
                             <ChevronLeft size={14} /> Back
                         </button>
@@ -859,7 +860,7 @@ export default function OnboardingTutorial({
                             <button
                                 type="button"
                                 onClick={isFinalStep ? finishTutorial : goNext}
-                                className="rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text hover:bg-stone-500/5"
+                                className="rounded-lg border es-global-outline px-4 py-2 text-xs font-bold es-general-text es-onboarding-hover"
                             >
                                 Skip
                             </button>
@@ -910,10 +911,10 @@ function ShortcutPrompt({
                 ? 'Needs retry'
                 : (idleLabel || 'Ready');
     const idleClass = idleTone === 'warning'
-        ? 'bg-amber-500/10 text-amber-500'
-        : 'bg-emerald-500/10 text-emerald-500';
+        ? 'es-onboarding-status-warning'
+        : 'es-onboarding-status-success';
     return (
-        <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4">
+        <div className="rounded-xl border es-global-outline es-onboarding-card p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <div className="text-[10px] font-black uppercase tracking-[0.18em] es-general-secondary-text">Shortcut</div>
@@ -921,11 +922,11 @@ function ShortcutPrompt({
                 </div>
                 <div className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-[0.12em] ${
                     state === 'listening'
-                        ? 'bg-rose-500/10 text-rose-400'
-            : state === 'processing'
-                            ? 'bg-emerald-500/10 text-emerald-500'
+                        ? 'es-onboarding-status-danger'
+                        : state === 'processing'
+                            ? 'es-onboarding-status-success'
                             : state === 'error'
-                                ? 'bg-rose-500/10 text-rose-400'
+                                ? 'es-onboarding-status-danger'
                                 : idleClass
                 }`}>
                     {statusLabel}
@@ -939,7 +940,7 @@ function ResultPreview({ title, body, markdown = false }: { title: string; body:
     const content = body || 'Waiting for content...';
 
     return (
-        <div className="rounded-xl border es-global-outline bg-white/70 dark:bg-white/[0.03] p-4">
+        <div className="rounded-xl border es-global-outline es-onboarding-card p-4">
             <div className="text-[10px] font-black uppercase tracking-[0.18em] es-general-secondary-text">{title}</div>
             {markdown ? (
                 <div className="mt-2 max-h-44 overflow-y-auto text-sm leading-relaxed es-md-prose es-general-text">
@@ -958,7 +959,7 @@ function ResultPreview({ title, body, markdown = false }: { title: string; body:
 
 function SuccessBanner({ text }: { text: string }) {
     return (
-        <div className="flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs font-bold text-emerald-500">
+        <div className="flex items-center gap-2 rounded-xl border es-onboarding-status-success p-3 text-xs font-bold">
             <Check size={14} strokeWidth={3} />
             {text}
         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
     Mic, 
     Accessibility, 
@@ -53,21 +53,25 @@ export default function OnboardingPage({
     
     const [accessibilityStatus, setAccessibilityStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
     const [accessibilityLoading, setAccessibilityLoading] = useState(false);
+    const [accessibilityAccessRequested, setAccessibilityAccessRequested] = useState(false);
     const [fnListenerStatus, setFnListenerStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
     const [fnListenerMessage, setFnListenerMessage] = useState('');
     const [fnListenerLoading, setFnListenerLoading] = useState(false);
     const [inputMonitoringLoading, setInputMonitoringLoading] = useState(false);
+    const [inputMonitoringAccessRequested, setInputMonitoringAccessRequested] = useState(false);
 
     const [screenStatus, setScreenStatus] = useState<'unknown' | 'granted' | 'denied' | 'not-determined'>('unknown');
     const [screenLoading, setScreenLoading] = useState(false);
+    const [screenAccessRequested, setScreenAccessRequested] = useState(false);
 
-    const [enableMeetings, setEnableMeetings] = useState(false);
-    const [meetingsStatus, setMeetingsStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
+    const [enableMeetings, setEnableMeetings] = useState(settings.meetingPromptEnabled === true);
+    const [meetingsStatus, setMeetingsStatus] = useState<'unknown' | 'granted' | 'denied'>(
+        settings.meetingPromptEnabled === true ? 'granted' : 'unknown',
+    );
     const [meetingsLoading, setMeetingsLoading] = useState(false);
 
     const [keychainStatus, setKeychainStatus] = useState<'unknown' | 'primed' | 'denied'>('unknown');
     const [keychainLoading, setKeychainLoading] = useState(false);
-    const screenPermissionRefreshInFlightRef = useRef(false);
 
     // General submission state
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -109,6 +113,13 @@ export default function OnboardingPage({
             ipcRenderer.removeListener('auth-state-updated', handleAuthStateUpdate);
         };
     }, []);
+
+    useEffect(() => {
+        if (settings.meetingPromptEnabled === true) {
+            setEnableMeetings(true);
+            setMeetingsStatus('granted');
+        }
+    }, [settings.meetingPromptEnabled]);
 
     // Polling effect for permissions check
     useEffect(() => {
@@ -153,18 +164,11 @@ export default function OnboardingPage({
                 setFnListenerMessage('');
             }
 
-            // Check System Audio Recording status only once the user reaches that step.
-            // The refresh path runs the native helper briefly so an already-granted
-            // permission is detected after reopening the app.
+            // Check System Audio Recording status without running the native probe.
+            // The probe can trigger macOS permission UI and must remain user-initiated.
             if (latestAccessibilityStatus === 'granted' && fnListenerStatus === 'granted') {
-                const shouldRefreshScreenStatus = activeSubStep === 'screen' && !screenPermissionRefreshInFlightRef.current;
-                if (shouldRefreshScreenStatus) {
-                    screenPermissionRefreshInFlightRef.current = true;
-                }
                 try {
-                    const result = await ipcRenderer.invoke('screen:get-access-status', {
-                        refresh: shouldRefreshScreenStatus,
-                    });
+                    const result = await ipcRenderer.invoke('screen:get-access-status');
                     const status = String(result?.status || 'unknown').toLowerCase();
                     if (status === 'granted') setScreenStatus('granted');
                     else if (status === 'denied' || status === 'restricted') setScreenStatus('denied');
@@ -172,10 +176,6 @@ export default function OnboardingPage({
                     else setScreenStatus('unknown');
                 } catch (e) {
                     console.error('Failed checking system audio recording permission:', e);
-                } finally {
-                    if (shouldRefreshScreenStatus) {
-                        screenPermissionRefreshInFlightRef.current = false;
-                    }
                 }
             }
 
@@ -204,15 +204,13 @@ export default function OnboardingPage({
         return () => {
             if (timer) clearInterval(timer);
         };
-    }, [step, activeSubStep, refreshFnListenerAccess, fnListenerStatus]);
+    }, [step, refreshFnListenerAccess, fnListenerStatus]);
 
     // Auto-advance sub-steps as they get completed
     useEffect(() => {
         if (step === 'permissions') {
             if (micStatus === 'granted' && activeSubStep === 'mic') {
                 setActiveSubStep('accessibility');
-            } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && activeSubStep === 'accessibility') {
-                setActiveSubStep('screen');
             } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && screenStatus === 'granted' && activeSubStep === 'screen') {
                 setActiveSubStep('keychain');
             } else if (micStatus === 'granted' && accessibilityStatus === 'granted' && fnListenerStatus === 'granted' && screenStatus === 'granted' && keychainStatus === 'primed' && activeSubStep === 'keychain') {
@@ -246,6 +244,7 @@ export default function OnboardingPage({
 
     // Request Accessibility permission
     const requestAccessibilityAccess = async () => {
+        setAccessibilityAccessRequested(true);
         setAccessibilityLoading(true);
         try {
             const result = await ipcRenderer.invoke('accessibility:request-access');
@@ -266,6 +265,7 @@ export default function OnboardingPage({
     };
 
     const requestInputMonitoringAccess = async () => {
+        setInputMonitoringAccessRequested(true);
         setInputMonitoringLoading(true);
         try {
             await ipcRenderer.invoke('input-monitoring:request-access');
@@ -285,6 +285,7 @@ export default function OnboardingPage({
 
     // Request System Audio Recording permission
     const requestScreenAccess = async () => {
+        setScreenAccessRequested(true);
         setScreenLoading(true);
         try {
             const result = await ipcRenderer.invoke('screen:request-access');
@@ -314,6 +315,10 @@ export default function OnboardingPage({
             if (result?.status === 'success' || result?.canEnable === true) {
                 setMeetingsStatus('granted');
                 setEnableMeetings(true);
+                await updateSettings({
+                    meetingPromptEnabled: true,
+                    meetingPromptConsentGranted: true,
+                });
             } else {
                 setMeetingsStatus('denied');
                 setEnableMeetings(false);
@@ -464,18 +469,18 @@ export default function OnboardingPage({
             `}</style>
 
             {/* Topbar Navigation */}
-            <div className="h-10 border-b es-global-separator flex items-center justify-between px-6 bg-[#ece9e6]/20 dark:bg-[#181818]/40 draggable select-none shrink-0 z-10">
+            <div className="h-10 border-b es-global-separator flex items-center justify-between px-6 es-onboarding-topbar draggable select-none shrink-0 z-10">
                 {/* Traffic lights spacer */}
                 <div className="w-20 shrink-0" />
 
                 {/* Steps indicator */}
                 <div className="flex items-center gap-1.5 md:gap-3 text-[10px] md:text-xs font-bold tracking-wider uppercase no-drag">
                     <StepIndicator label="Welcome" active={step === 'welcome'} completed={step !== 'welcome'} />
-                    <ChevronRight size={10} className="text-stone-400" />
+                    <ChevronRight size={10} className="es-general-secondary-text" />
                     <StepIndicator label="Permissions" active={step === 'permissions'} completed={step === 'account' || step === 'tutorial'} />
-                    <ChevronRight size={10} className="text-stone-400" />
+                    <ChevronRight size={10} className="es-general-secondary-text" />
                     <StepIndicator label="Account" active={step === 'account'} completed={step === 'tutorial'} />
-                    <ChevronRight size={10} className="text-stone-400" />
+                    <ChevronRight size={10} className="es-general-secondary-text" />
                     <StepIndicator label="Tutorial" active={step === 'tutorial'} completed={false} />
                 </div>
 
@@ -484,9 +489,9 @@ export default function OnboardingPage({
             </div>
 
             {/* Progress line indicator */}
-            <div className="h-[2px] w-full bg-stone-500/10 shrink-0 relative">
+            <div className="h-[2px] w-full es-onboarding-progress-track shrink-0 relative">
                 <div 
-                    className="absolute top-0 left-0 h-full bg-gradient-to-r from-violet-500 to-emerald-500 transition-all duration-500 ease-out" 
+                    className="absolute top-0 left-0 h-full es-onboarding-progress-fill transition-all duration-500 ease-out" 
                     style={{ width: stepProgress }}
                 />
             </div>
@@ -557,7 +562,7 @@ export default function OnboardingPage({
                                         className={`p-4 rounded-xl border cursor-pointer transition-all ${
                                             accountChoice === 'login'
                                                 ? 'border-emerald-500 bg-emerald-500/5 shadow-md'
-                                                : 'es-global-outline hover:bg-stone-500/5'
+                                                : 'es-global-outline es-onboarding-hover'
                                         }`}
                                     >
                                         <div className="flex items-center justify-between mb-1">
@@ -578,7 +583,7 @@ export default function OnboardingPage({
                                         className={`p-4 rounded-xl border cursor-pointer transition-all ${
                                             accountChoice === 'local'
                                                 ? 'border-emerald-500 bg-emerald-500/5 shadow-md'
-                                                : 'es-global-outline hover:bg-stone-500/5'
+                                                : 'es-global-outline es-onboarding-hover'
                                         }`}
                                     >
                                         <div className="flex items-center justify-between mb-1">
@@ -595,7 +600,7 @@ export default function OnboardingPage({
 
                                     {/* Sign In action when login is selected */}
                                     {accountChoice === 'login' && !localAuthState.isLoggedIn && (
-                                        <div className="p-4 rounded-xl border es-global-outline bg-stone-500/5 flex items-center justify-between gap-4">
+                                        <div className="p-4 rounded-xl border es-global-outline es-onboarding-muted-surface flex items-center justify-between gap-4">
                                             <div className="min-w-0 flex-1">
                                                 <div className="text-xs font-bold es-general-text">Escribolt Server Auth</div>
                                                 <p className="text-[11px] es-general-secondary-text mt-0.5">Authorize via browser. No passwords needed.</p>
@@ -615,7 +620,7 @@ export default function OnboardingPage({
 
                                     {/* Logged in confirmation */}
                                     {localAuthState.isLoggedIn && (
-                                        <div className="p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 text-[11px] text-emerald-400 font-semibold flex items-center gap-2 justify-center">
+                                        <div className="p-3 rounded-xl border es-onboarding-status-success text-[11px] font-semibold flex items-center gap-2 justify-center">
                                             <CheckCircle2 size={14} />
                                             Signed in as {localAuthState.email || localAuthState.displayName || 'your account'}
                                         </div>
@@ -635,7 +640,7 @@ export default function OnboardingPage({
                                         type="button"
                                         disabled={isSubmitting}
                                         onClick={() => void saveSetupAndStartTutorial()}
-                                        className="px-4 py-2 text-xs font-semibold rounded-lg border es-global-outline es-general-text hover:bg-stone-500/5 disabled:opacity-50"
+                                        className="px-4 py-2 text-xs font-semibold rounded-lg border es-global-outline es-general-text es-onboarding-hover disabled:opacity-50"
                                     >
                                         Skip Sign In
                                     </button>
@@ -680,7 +685,7 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        micStatus === 'granted' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        micStatus === 'granted' ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral'
                                                     }`}>
                                                         {micStatus === 'granted' ? <Check size={14} strokeWidth={3} /> : <Mic size={14} />}
                                                     </div>
@@ -690,9 +695,9 @@ export default function OnboardingPage({
                                                     </div>
                                                 </div>
                                                 {micStatus === 'granted' ? (
-                                                    <span className="text-[10px] text-emerald-400 font-bold uppercase">Allowed</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-success font-bold uppercase">Allowed</span>
                                                 ) : (
-                                                    <span className="text-[10px] text-rose-400 font-bold uppercase">Required</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-danger font-bold uppercase">Required</span>
                                                 )}
                                             </div>
 
@@ -751,7 +756,7 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        shortcutsReady ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        shortcutsReady ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral'
                                                     }`}>
                                                         {shortcutsReady ? <Check size={14} strokeWidth={3} /> : <Accessibility size={14} />}
                                                     </div>
@@ -761,9 +766,9 @@ export default function OnboardingPage({
                                                     </div>
                                                 </div>
                                                 {shortcutsReady ? (
-                                                    <span className="text-[10px] text-emerald-400 font-bold uppercase">Allowed</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-success font-bold uppercase">Allowed</span>
                                                 ) : (
-                                                    <span className="text-[10px] text-rose-400 font-bold uppercase">Required</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-danger font-bold uppercase">Required</span>
                                                 )}
                                             </div>
 
@@ -792,7 +797,7 @@ export default function OnboardingPage({
                                                                 {accessibilityLoading ? 'Requesting...' : 'Allow Accessibility'}
                                                             </button>
                                                         )}
-                                                        {accessibilityStatus === 'denied' && (
+                                                        {accessibilityStatus === 'denied' && accessibilityAccessRequested && (
                                                             <button
                                                                 type="button"
                                                                 onClick={(e) => {
@@ -830,7 +835,7 @@ export default function OnboardingPage({
                                                                 {inputMonitoringLoading ? 'Requesting...' : 'Allow Input Monitoring'}
                                                             </button>
                                                         )}
-                                                        {accessibilityStatus === 'granted' && fnListenerStatus === 'denied' && (
+                                                        {accessibilityStatus === 'granted' && fnListenerStatus === 'denied' && inputMonitoringAccessRequested && (
                                                             <button
                                                                 type="button"
                                                                 onClick={(e) => {
@@ -865,7 +870,7 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        screenStatus === 'granted' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        screenStatus === 'granted' ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral'
                                                     }`}>
                                                         {screenStatus === 'granted' ? <Check size={14} strokeWidth={3} /> : <Volume2 size={14} />}
                                                     </div>
@@ -875,9 +880,9 @@ export default function OnboardingPage({
                                                     </div>
                                                 </div>
                                                 {screenStatus === 'granted' ? (
-                                                    <span className="text-[10px] text-emerald-400 font-bold uppercase">Allowed</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-success font-bold uppercase">Allowed</span>
                                                 ) : (
-                                                    <span className="text-[10px] text-rose-400 font-bold uppercase">Required</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-danger font-bold uppercase">Required</span>
                                                 )}
                                             </div>
 
@@ -903,16 +908,18 @@ export default function OnboardingPage({
                                                                 >
                                                                     {screenLoading ? 'Requesting...' : 'Request Access'}
                                                                 </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        ipcRenderer.invoke('screen:open-settings');
-                                                                    }}
-                                                                    className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text"
-                                                                >
-                                                                    Open System Settings
-                                                                </button>
+                                                                {screenAccessRequested && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            ipcRenderer.invoke('screen:open-settings');
+                                                                        }}
+                                                                        className="px-3 py-1.5 text-xs font-bold rounded-lg es-global-outline es-general-text"
+                                                                    >
+                                                                        Open System Settings
+                                                                    </button>
+                                                                )}
                                                             </>
                                                         ) : (
                                                             <button
@@ -950,7 +957,7 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        keychainStatus === 'primed' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        keychainStatus === 'primed' ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral'
                                                     }`}>
                                                         {keychainStatus === 'primed' ? <Check size={14} strokeWidth={3} /> : <Lock size={14} />}
                                                     </div>
@@ -960,9 +967,9 @@ export default function OnboardingPage({
                                                     </div>
                                                 </div>
                                                 {keychainStatus === 'primed' ? (
-                                                    <span className="text-[10px] text-emerald-400 font-bold uppercase">Primed</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-success font-bold uppercase">Primed</span>
                                                 ) : (
-                                                    <span className="text-[10px] text-rose-400 font-bold uppercase">Required</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-danger font-bold uppercase">Required</span>
                                                 )}
                                             </div>
 
@@ -1001,7 +1008,7 @@ export default function OnboardingPage({
                                                         </button>
                                                     </div>
                                                     {keychainStatus === 'denied' && (
-                                                        <p className="text-[10px] text-rose-400 leading-snug">
+                                                        <p className="rounded-lg border es-onboarding-status-danger p-2 text-[10px] leading-snug">
                                                             Keychain access was denied. You can still use Escribolt, but you may be prompted to log in again after restarting the app.
                                                         </p>
                                                     )}
@@ -1027,7 +1034,7 @@ export default function OnboardingPage({
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
                                                     <div className={`h-8 w-8 rounded-full flex items-center justify-center shrink-0 ${
-                                                        meetingsStatus === 'granted' && enableMeetings ? 'bg-emerald-500/10 text-emerald-400' : 'bg-stone-500/10 text-stone-500'
+                                                        meetingsStatus === 'granted' && enableMeetings ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral'
                                                     }`}>
                                                         {meetingsStatus === 'granted' && enableMeetings ? <Check size={14} strokeWidth={3} /> : <Monitor size={14} />}
                                                     </div>
@@ -1037,9 +1044,9 @@ export default function OnboardingPage({
                                                     </div>
                                                 </div>
                                                 {enableMeetings && meetingsStatus === 'granted' ? (
-                                                    <span className="text-[10px] text-emerald-400 font-bold uppercase">Enabled</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-success font-bold uppercase">Enabled</span>
                                                 ) : (
-                                                    <span className="text-[10px] text-stone-400 font-bold uppercase">Optional</span>
+                                                    <span className="rounded-full px-2 py-0.5 text-[10px] es-onboarding-status-neutral font-bold uppercase">Optional</span>
                                                 )}
                                             </div>
 
@@ -1048,36 +1055,35 @@ export default function OnboardingPage({
                                                     <p className="text-[11px] es-general-secondary-text leading-snug">
                                                         Automatically scans browser tabs to offer meeting records. Requires Automation permission.
                                                     </p>
-                                                    <div className="flex items-center justify-between py-1 bg-stone-500/5 px-2 rounded-lg border es-global-outline">
+                                                    <div className="flex items-center justify-between py-1 es-onboarding-muted-surface px-2 rounded-lg border es-global-outline">
                                                         <span className="text-xs font-semibold es-general-text">Enable feature</span>
-                                                        <input 
-                                                            type="checkbox" 
+                                                        <input
+                                                            type="checkbox"
                                                             className="h-4 w-4 cursor-pointer accent-emerald-500"
                                                             checked={enableMeetings}
                                                             onClick={(e) => e.stopPropagation()}
+                                                            disabled={meetingsLoading}
                                                             onChange={(e) => {
-                                                                setEnableMeetings(e.target.checked);
-                                                                if (e.target.checked && meetingsStatus === 'unknown') {
-                                                                    requestMeetingsAccess();
+                                                                const checked = e.target.checked;
+                                                                setEnableMeetings(checked);
+                                                                if (checked) {
+                                                                    if (meetingsStatus !== 'granted') {
+                                                                        void requestMeetingsAccess();
+                                                                    } else {
+                                                                        void updateSettings({
+                                                                            meetingPromptEnabled: true,
+                                                                            meetingPromptConsentGranted: true,
+                                                                        });
+                                                                    }
+                                                                } else {
+                                                                    void updateSettings({
+                                                                        meetingPromptEnabled: false,
+                                                                        meetingPromptConsentGranted: false,
+                                                                    });
                                                                 }
                                                             }}
                                                         />
                                                     </div>
-                                                    {enableMeetings && meetingsStatus !== 'granted' && (
-                                                        <div className="flex gap-2 pt-1">
-                                                            <button
-                                                                type="button"
-                                                                disabled={meetingsLoading}
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    requestMeetingsAccess();
-                                                                }}
-                                                                className="px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white shadow"
-                                                            >
-                                                                {meetingsLoading ? 'Requesting...' : 'Allow'}
-                                                            </button>
-                                                        </div>
-                                                    )}
                                                 </div>
                                             )}
                                         </div>
@@ -1089,7 +1095,7 @@ export default function OnboardingPage({
                                     <button
                                         type="button"
                                         onClick={() => setStep('welcome')}
-                                        className="px-4 py-2 text-xs font-semibold rounded-lg border es-global-outline es-general-text hover:bg-stone-500/5 flex items-center gap-1"
+                                        className="px-4 py-2 text-xs font-semibold rounded-lg border es-global-outline es-general-text es-onboarding-hover flex items-center gap-1"
                                     >
                                         <ChevronLeft size={14} /> Back
                                     </button>
@@ -1107,8 +1113,8 @@ export default function OnboardingPage({
                     </div>
 
                     {/* Right Panel: Adaptive Graphic Illustration */}
-                    <div className="flex-1 bg-[#ece9e6] dark:bg-[#1f1f1f] flex items-center justify-center p-8 relative overflow-hidden select-none">
-                        <div className="absolute inset-0 bg-radial-gradient from-transparent to-black/5 dark:to-black/20 pointer-events-none" />
+                    <div className="flex-1 es-onboarding-illustration-panel flex items-center justify-center p-8 relative overflow-hidden select-none">
+                        <div className="absolute inset-0 es-onboarding-illustration-scrim pointer-events-none" />
                         
                         <div className="z-10 flex flex-col items-center">
                             {renderActiveIllustration()}
@@ -1160,12 +1166,12 @@ function StepIndicator({ label, active, completed }: StepIndicatorProps) {
             <div className={`h-5 w-5 rounded-full flex items-center justify-center text-[9px] font-bold transition-all border ${
                 active 
                     ? 'bg-emerald-500 text-white border-emerald-500 shadow-md' 
-                    : (completed ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-transparent text-stone-500 border-stone-500/20')
+                    : (completed ? 'es-onboarding-status-success' : 'es-onboarding-status-neutral')
             }`}>
                 {completed ? <Check size={8} strokeWidth={4} /> : null}
                 {!completed && active ? <div className="h-1.5 w-1.5 rounded-full bg-white" /> : null}
             </div>
-            <span className={`text-[10px] md:text-xs font-bold transition-colors ${active ? 'es-general-text' : (completed ? 'text-emerald-500' : 'text-stone-400')}`}>
+            <span className={`text-[10px] md:text-xs font-bold transition-colors ${active ? 'es-general-text' : (completed ? 'es-onboarding-success-text' : 'es-general-secondary-text')}`}>
                 {label}
             </span>
         </div>
